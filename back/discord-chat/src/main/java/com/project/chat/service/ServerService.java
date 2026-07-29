@@ -189,20 +189,18 @@ public class ServerService {
             throw new RuntimeException("You cannot ban yourself.");
         }
 
-        // ۵. منطق سلسله مراتبی بر اساس پرامیشن‌ها (نه اسم نقش)
-        boolean requesterIsOwner = permissionUtil.hasPermission(requester.getRole(), "*");
-        boolean targetHasBanPermission = permissionUtil.hasPermission(target.getRole(), "BAN_MEMBERS");
-        boolean targetIsOwner = permissionUtil.hasPermission(target.getRole(), "*");
+        // ۵. منطق سلسله مراتبی بن کردن
+        String requesterRoleName = requester.getRole().getName();
+        String targetRoleName = target.getRole().getName();
 
-        // اگر طرف مقصد اونر است (پرامیشن * دارد) -> هیچکس نمی‌تواند اونر را بن کند
-        if (targetIsOwner) {
+        // هیچکس (حتی ادمین‌ها) نمی‌تواند اونر را بن کند
+        if (targetRoleName.equals("OWNER")) {
             throw new RuntimeException("You cannot ban the server OWNER.");
         }
 
-        // اگر طرف مقصد دسترسی بن کردن دارد (مثلا ادمین است) و درخواست دهنده اونر نیست
-        // این یعنی: ادمین نتواند ادمین دیگر را بن کند، ولی اونر بتواند ادمین را بن کند
-        if (targetHasBanPermission && !requesterIsOwner) {
-            throw new RuntimeException("You cannot ban another member who has banning privileges.");
+        // ادمین‌ها نمی‌توانند ادمین‌های دیگر را بن کنند (اونر اینجا پاس نمی‌شود چون نقشش OWNER است)
+        if (requesterRoleName.equals("ADMIN") && targetRoleName.equals("ADMIN")) {
+            throw new RuntimeException("As an ADMIN, you cannot ban another ADMIN.");
         }
 
         // ۶. حذف شخص از سرور (عملیات بن در این پروژه)
