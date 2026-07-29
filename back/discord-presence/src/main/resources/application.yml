@@ -1,0 +1,31 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: discord-presence
+
+  # تنظیمات ردیس
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+  # تنظیمات ربیت ام کیو برای ارتباط با ماژول وب‌سوکت
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+  # امنیت کی‌کلاک
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8080/realms/discord-realm
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/

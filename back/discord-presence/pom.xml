@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.project</groupId>
+    <artifactId>discord-clone</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <groupId>com.project</groupId>
+  <artifactId>discord-presence</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <name>discord-presence</name>
+
+  <properties>
+    <java.version>17</java.version>
+    <spring-cloud.version>2023.0.0</spring-cloud.version>
+  </properties>
+
+  <dependencies>
+    <!-- وب سرویس -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- ردیس برای ذخیره وضعیت آنلاین و لیست صدای افراد -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
+    <!-- ربیت ام کیو برای ارسال رویدادها به ماژول وب‌سوکت -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
+
+    <!-- اورکا برای ثبت سرویس -->
+    <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+    </dependency>
+
+    <!-- امنیت و استخراج یوزرنیم از توکن کی‌کلاک -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+
+    <!-- ماژول مشترک برای استفاده از DTO ها -->
+    <dependency>
+      <groupId>com.project</groupId>
+      <artifactId>discord-common</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-dependencies</artifactId>
+        <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

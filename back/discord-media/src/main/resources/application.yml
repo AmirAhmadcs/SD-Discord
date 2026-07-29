@@ -1,0 +1,22 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: DISCORD-MEDIA
+  servlet:
+    multipart:
+      max-file-size: 50MB # حداکثر حجم هر فایل
+      max-request-size: 50MB
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+
+# تنظیمات اختصاصی ما برای اتصال به MinIO
+minio:
+  url: http://localhost:9000
+  access-key: admin
+  secret-key: password
+  bucket-name: discord-files # اسم سطلی که فایل‌هامون توش می‌ریزه

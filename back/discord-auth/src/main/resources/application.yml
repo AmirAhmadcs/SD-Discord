@@ -1,0 +1,39 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: discord-auth
+  datasource:
+    url: jdbc:postgresql://localhost:5435/discord_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8080/realms/discord-realm
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+keycloak:
+  admin:
+    server-url: http://localhost:8080
+    realm: discord-realm
+    target-realm: discord-realm
+    client-id: discord-client
+    client-secret: hOwTeywlaoEgC0MFpvGy9zJ8cP9XGmfv
+    master-username: admin
+    master-password: admin
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/

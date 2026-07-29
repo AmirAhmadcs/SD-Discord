@@ -1,0 +1,112 @@
+server:
+  port: 8000
+
+spring:
+  application:
+    name: discord-gateway
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+      routes:
+        # --- مسیریابی‌های اصلی API ---
+        - id: discord-auth
+          uri: lb://DISCORD-AUTH
+          predicates:
+            - Path=/api/v1/users/**, /api/v1/auth/**, /api/test/**
+
+        - id: websocket-service
+          uri: lb:ws://DISCORD-WEBSOCKET
+          predicates:
+            - Path=/ws/**
+
+        - id: discord-chat
+          uri: lb://DISCORD-CHAT
+          predicates:
+            - Path=/api/v1/servers/**, /api/v1/channels/**, /api/v1/messages/**, /api/v1/topics/**, /api/v1/dm/**
+
+        - id: discord-media
+          uri: lb://DISCORD-MEDIA
+          predicates:
+            - Path=/api/media/**
+
+        - id: presence-service
+          uri: lb://discord-presence
+          predicates:
+            - Path=/api/v1/presence/**
+
+        - id: voice-service
+          uri: lb://discord-voice
+          predicates:
+            - Path=/api/v1/voice/**
+
+        # --- مسیریابی‌های جدید برای جمع‌آوری سوگر سرویس‌ها ---
+        - id: auth-docs
+          uri: lb://DISCORD-AUTH
+          predicates:
+            - Path=/v3/api-docs/auth/**
+          filters:
+            - RewritePath=/v3/api-docs/auth/(?<segment>.*), /v3/api-docs/$\{segment}
+
+        - id: chat-docs
+          uri: lb://DISCORD-CHAT
+          predicates:
+            - Path=/v3/api-docs/chat/**
+          filters:
+            - RewritePath=/v3/api-docs/chat/(?<segment>.*), /v3/api-docs/$\{segment}
+
+        - id: media-docs
+          uri: lb://DISCORD-MEDIA
+          predicates:
+            - Path=/v3/api-docs/media/**
+          filters:
+            - RewritePath=/v3/api-docs/media/(?<segment>.*), /v3/api-docs/$\{segment}
+
+        - id: presence-docs
+          uri: lb://discord-presence
+          predicates:
+            - Path=/v3/api-docs/presence/**
+          filters:
+            - RewritePath=/v3/api-docs/presence/(?<segment>.*), /v3/api-docs/$\{segment}
+
+        - id: voice-docs
+          uri: lb://discord-voice
+          predicates:
+            - Path=/v3/api-docs/voice/**
+          filters:
+            - RewritePath=/v3/api-docs/voice/(?<segment>.*), /v3/api-docs/$\{segment}
+
+# --- تنظیمات Swagger UI و اتصال واقعی به Keycloak ---
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    oauth:
+      client-id: discord-client
+      client-secret: hOwTeywlaoEgC0MFpvGy9zJ8cP9XGmfv
+      realm: discord-realm
+      authorization-url: http://localhost:8080/realms/discord-realm/protocol/openid-connect/auth
+      token-url: http://localhost:8080/realms/discord-realm/protocol/openid-connect/token
+  api-docs:
+    enabled: true
+  urls:
+    auth:
+      url: /v3/api-docs/auth
+      name: Auth Service
+    chat:
+      url: /v3/api-docs/chat
+      name: Chat Service
+    media:
+      url: /v3/api-docs/media
+      name: Media Service
+    presence:
+      url: /v3/api-docs/presence
+      name: Presence Service
+    voice:
+      url: /v3/api-docs/voice
+      name: Voice Service
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/

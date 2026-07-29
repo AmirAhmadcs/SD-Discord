@@ -1,0 +1,25 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: discord-voice
+
+  # این ماژول فقط به ربیت وصل میشه تا پیام‌های صوتی رو به وب‌سوکت پمپاژ کنه
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+  # امنیت کی‌کلاک
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8080/realms/discord-realm
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
