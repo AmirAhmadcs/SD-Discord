@@ -1,21 +1,36 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { StoreProvider, useStore } from './context/StoreContext';
-import RegisterPage from './pages/RegisterPage';
-import LoginPage from './pages/LoginPage';
-import AppShell from './pages/AppShell';
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { StoreProvider, useStore } from "./context/StoreContext";
+import RegisterPage from "./pages/RegisterPage";
+import LoginPage from "./pages/LoginPage";
+import AppShell from "./pages/AppShell";
 
 function RequireGuest({ children }) {
-  const { currentUser } = useStore();
-  if (currentUser) return <Navigate to="/" replace />;
+  const { currentUser, db } = useStore();
+
+  if (!db.initialized) {
+    return null;
+  }
+
+  if (currentUser) {
+    return <Navigate to="/" replace />;
+  }
+
   return children;
 }
 
 function RequireAuth({ children }) {
-  const { currentUser } = useStore();
-  if (!currentUser) return <Navigate to="/login" replace />;
+  const { currentUser, db } = useStore();
+
+  if (!db.initialized) {
+    return null;
+  }
+
+  if (!currentUser) {
+    return <Navigate to="/login" replace />;
+  }
+
   return children;
 }
-
 export default function App() {
   return (
     <StoreProvider>

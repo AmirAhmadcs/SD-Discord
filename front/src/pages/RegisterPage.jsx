@@ -14,11 +14,11 @@ export default function RegisterPage() {
     return (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
   }
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setSubmitting(true);
-    const result = store.register(form);
+    const result = await store.register(form);
     setSubmitting(false);
     if (!result.ok) {
       setError(result.error);

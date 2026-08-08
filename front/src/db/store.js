@@ -1,1111 +1,2959 @@
-import { makeId } from '../utils/id';
+const ACCESS_TOKEN_KEY = 'discord_access_token';
+const REFRESH_TOKEN_KEY = 'discord_refresh_token';
 
-// ---------------------------------------------------------------------------
-// This module simulates a backend + database entirely in the browser using
-// localStorage, so the whole messenger works with zero server setup.
-// Every exported function mirrors what a real API endpoint would do:
-// it validates input, enforces permissions, mutates the "database" and
-// returns a { ok, error, data } result. Swap this file for real HTTP/WS
-// calls later without touching any component — the function signatures are
-// designed to map 1:1 onto real endpoints.
-// ---------------------------------------------------------------------------
+export const MAX_FILE_BYTES_EXPORT = 4 * 1024 * 1024;
 
-const STORAGE_KEY = 'msgr_db_v1';
-const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4MB cap so localStorage never overflows
-const NOTIFICATION_PREVIEW_LEN = 80;
+// -----------------------------------------------------------------------------
+// Frontend state only.
+// All domain data in these objects comes from backend responses.
+// -----------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Channel role permission bits
-// ---------------------------------------------------------------------------
-const ALL_PERMS_TRUE = {
-  post: true,
-  deleteAnyMessage: true,
-  manageMembers: true,
-  manageTopics: true,
-  manageChannel: true,
-  manageRoles: true,
-};
-const ALL_PERMS_FALSE = {
-  post: false,
-  deleteAnyMessage: false,
-  manageMembers: false,
-  manageTopics: false,
-  manageChannel: false,
-  manageRoles: false,
+let state = {
+  initialized: false,
+
+  currentUserId: null,
+
+  users: {},
+  dms: {},
+  groups: {},
+  channels: {},
+  messages: {},
+
+  // Kept only because some existing UI code reads it.
+  // We are NOT implementing fake offline mode anymore.
+  simulateOffline: false,
 };
 
-function emptyDb() {
+const listeners = new Set();
+
+// -----------------------------------------------------------------------------
+// React store helpers
+// -----------------------------------------------------------------------------
+
+function emit() {
+  listeners.forEach((listener) => listener());
+}
+
+function updateState(updater) {
+  const next = updater(state);
+  state = next || state;
+  emit();
+}
+
+export function subscribe(listener) {
+  listeners.add(listener);
+
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function getSnapshot() {
+  return state;
+}
+
+// -----------------------------------------------------------------------------
+// Token helpers
+// -----------------------------------------------------------------------------
+
+function getAccessToken() {
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
+}
+
+function getRefreshToken() {
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+
+function saveTokens(tokens) {
+  if (tokens?.accessToken) {
+    localStorage.setItem(
+      ACCESS_TOKEN_KEY,
+      tokens.accessToken,
+    );
+  }
+
+  if (tokens?.refreshToken) {
+    localStorage.setItem(
+      REFRESH_TOKEN_KEY,
+      tokens.refreshToken,
+    );
+  }
+}
+
+function clearTokens() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+// -----------------------------------------------------------------------------
+// API helper
+// -----------------------------------------------------------------------------
+
+async function parseResponse(response) {
+  if (response.status === 204) {
+    return null;
+  }
+
+  const contentType =
+    response.headers.get('content-type') || '';
+
+  if (
+    contentType.includes(
+      'application/json',
+    )
+  ) {
+    return response.json();
+  }
+
+  return response.text();
+}
+
+function getErrorMessage(
+  data,
+  response,
+) {
+  if (
+    typeof data === 'string' &&
+    data.trim()
+  ) {
+    return data;
+  }
+
+  if (data?.message) {
+    return data.message;
+  }
+
+  if (data?.error) {
+    return data.error;
+  }
+
+  return `${response.status} ${response.statusText}`;
+}
+
+async function refreshAccessToken() {
+  const refreshToken =
+    getRefreshToken();
+
+  if (!refreshToken) {
+    return false;
+  }
+
+  const response = await fetch(
+    '/api/v1/users/refresh',
+    {
+      method: 'POST',
+
+      headers: {
+        'Content-Type':
+          'application/json',
+      },
+
+      body: JSON.stringify({
+        refreshToken,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    clearTokens();
+    return false;
+  }
+
+  const tokens =
+    await parseResponse(
+      response,
+    );
+
+  saveTokens(tokens);
+
+  return true;
+}
+
+async function api(
+  path,
+  {
+    method = 'GET',
+    body,
+    formData,
+    auth = true,
+    retry = true,
+  } = {},
+) {
+  const headers = {};
+
+  if (auth) {
+    const token =
+      getAccessToken();
+
+    if (token) {
+      headers.Authorization =
+        `Bearer ${token}`;
+    }
+  }
+
+  if (
+    body !== undefined
+  ) {
+    headers['Content-Type'] =
+      'application/json';
+  }
+
+  console.log(
+    `[API] ${method} ${path}`,
+    body ?? '',
+  );
+
+  const response =
+    await fetch(path, {
+      method,
+      headers,
+
+      body:
+        formData ||
+        (
+          body !== undefined
+            ? JSON.stringify(body)
+            : undefined
+        ),
+    });
+
+  if (
+    response.status === 401 &&
+    auth &&
+    retry &&
+    path !==
+      '/api/v1/users/refresh'
+  ) {
+    const refreshed =
+      await refreshAccessToken();
+
+    if (refreshed) {
+      return api(path, {
+        method,
+        body,
+        formData,
+        auth,
+        retry: false,
+      });
+    }
+  }
+
+  const data =
+    await parseResponse(
+      response,
+    );
+
+  if (!response.ok) {
+    throw new Error(
+      getErrorMessage(
+        data,
+        response,
+      ),
+    );
+  }
+
+  return data;
+}
+
+// -----------------------------------------------------------------------------
+// Standard return objects used by your existing UI
+// -----------------------------------------------------------------------------
+
+function ok(data = null) {
   return {
-    currentUserId: null,
-    simulateOffline: false,
+    ok: true,
+    data,
+  };
+}
+
+function fail(error) {
+  return {
+    ok: false,
+
+    error:
+      error instanceof Error
+        ? error.message
+        : String(error),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// User normalization
+// -----------------------------------------------------------------------------
+
+function splitName(name) {
+  const parts =
+    String(name || '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+  return {
+    firstName:
+      parts[0] || '',
+
+    // Backend requires lastName.
+    lastName:
+      parts
+        .slice(1)
+        .join(' ') ||
+      parts[0] ||
+      '',
+  };
+}
+
+function userFromApi(profile) {
+  if (!profile?.username) {
+    return null;
+  }
+
+  const existing =
+    state.users[
+      profile.username
+    ] || {};
+
+  const name = [
+    profile.firstName,
+    profile.lastName,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  return {
+    ...existing,
+
+    // Use username as frontend identity because
+    // several backend DTOs don't contain UUID.
+    id:
+      profile.username,
+
+    backendId:
+      profile.id ??
+      existing.backendId ??
+      null,
+
+    username:
+      profile.username,
+
+    name:
+      name ||
+      existing.name ||
+      profile.username,
+
+    email:
+      profile.email ??
+      existing.email ??
+      '',
+
+    bio:
+      profile.bio ??
+      existing.bio ??
+      '',
+
+    avatarUrls:
+      profile.avatarUrls ??
+      existing.avatarUrls ??
+      [],
+
+    allowAddToGroup:
+      profile.allowGroupAdditions ??
+      existing.allowAddToGroup ??
+      true,
+  };
+}
+
+function userReference(username) {
+  /*
+   * This isn't fake backend data.
+   *
+   * The username came from ServerMember.
+   * This is only a temporary frontend representation
+   * until /users/{username} is fetched.
+   */
+  return {
+    id: username,
+    username,
+    name: username,
+    email: '',
+    bio: '',
+    avatarUrls: [],
+    allowAddToGroup: true,
+  };
+}
+
+function cacheUser(profile) {
+  const user =
+    userFromApi(profile);
+
+  if (!user) {
+    return null;
+  }
+
+  updateState((s) => ({
+    ...s,
+
+    users: {
+      ...s.users,
+
+      [user.id]:
+        user,
+    },
+  }));
+
+  return user;
+}
+
+function ensureUserReference(
+  username,
+) {
+  if (
+    !username ||
+    state.users[
+      username
+    ]
+  ) {
+    return;
+  }
+
+  updateState((s) => ({
+    ...s,
+
+    users: {
+      ...s.users,
+
+      [username]:
+        userReference(
+          username,
+        ),
+    },
+  }));
+}
+
+async function loadUserProfile(
+  username,
+) {
+  if (!username) {
+    return null;
+  }
+
+  try {
+    const profile =
+      await api(
+        `/api/v1/users/${encodeURIComponent(
+          username,
+        )}`,
+      );
+
+    return cacheUser(
+      profile,
+    );
+  } catch {
+    // Username still came from backend server/member response.
+    ensureUserReference(
+      username,
+    );
+
+    return (
+      state.users[
+        username
+      ] || null
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Role / permission normalization
+// -----------------------------------------------------------------------------
+
+function parsePermissions(role) {
+  try {
+    return JSON.parse(
+      role?.permissionsJson ||
+      '[]',
+    );
+  } catch {
+    return [];
+  }
+}
+
+function frontendPermissions(
+  role,
+) {
+  const permissions =
+    parsePermissions(role);
+
+  const all =
+    permissions.includes('*');
+
+  const has =
+    (permission) =>
+      all ||
+      permissions.includes(
+        permission,
+      );
+
+  return {
+    post:
+      has('SEND_TEXT'),
+
+    deleteAnyMessage:
+      has(
+        'DELETE_ANY_MESSAGE',
+      ),
+
+    manageMembers:
+      has('BAN_MEMBERS'),
+
+    manageTopics:
+      has('MANAGE_TOPICS'),
+
+    manageChannel:
+      has(
+        'MANAGE_CHANNELS',
+      ),
+
+    manageRoles:
+      has('MANAGE_ROLES'),
+  };
+}
+
+function normalizeRole(role) {
+  return {
+    id: role.id,
+    name: role.name,
+
+    permissions:
+      frontendPermissions(
+        role,
+      ),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Topic normalization
+// -----------------------------------------------------------------------------
+
+function normalizeTopic(topic) {
+  return {
+    id: topic.id,
+    name: topic.name,
+
+    createdAt:
+      topic.createdAt ??
+      null,
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Server / Channel normalization
+// -----------------------------------------------------------------------------
+
+function normalizeChannel(
+  channel,
+  server,
+) {
+  const roles =
+    Object.fromEntries(
+      (
+        server.roles || []
+      ).map(
+        (role) => [
+          role.id,
+          normalizeRole(role),
+        ],
+      ),
+    );
+
+  const memberRoles = {};
+
+  for (
+    const member
+    of server.members || []
+  ) {
+    if (
+      member?.username &&
+      member?.role?.id != null
+    ) {
+      memberRoles[
+        member.username
+      ] =
+        member.role.id;
+    }
+  }
+
+  const memberIds =
+    Array.from(
+      new Set(
+        [
+          server.ownerUsername,
+
+          ...(
+            server.members || []
+          ).map(
+            (member) =>
+              member.username,
+          ),
+        ].filter(Boolean),
+      ),
+    );
+
+  const memberRole =
+    (
+      server.roles || []
+    ).find(
+      (role) =>
+        role.name ===
+        'MEMBER',
+    );
+
+  return {
+    id: channel.id,
+
+    name:
+      channel.name,
+
+    type:
+      channel.type,
+
+    serverId:
+      server.id,
+
+    ownerId:
+      server.ownerUsername,
+
+    memberIds,
+
+    mediaAllowed:
+      channel.mediaRestricted !==
+      true,
+
+    // Channel entity currently has no createdAt.
+    createdAt: null,
+
+    topics:
+      Object.fromEntries(
+        (
+          channel.topics || []
+        ).map(
+          (topic) => [
+            topic.id,
+            normalizeTopic(
+              topic,
+            ),
+          ],
+        ),
+      ),
+
+    roles,
+
+    memberRoles,
+
+    defaultRoleId:
+      memberRole?.id ??
+      null,
+  };
+}
+
+function normalizeServer(
+  server,
+) {
+  const memberIds =
+    Array.from(
+      new Set(
+        [
+          server.ownerUsername,
+
+          ...(
+            server.members || []
+          ).map(
+            (member) =>
+              member.username,
+          ),
+        ].filter(Boolean),
+      ),
+    );
+
+  return {
+    id: server.id,
+
+    name:
+      server.name,
+
+    iconUrl:
+      server.iconUrl ??
+      null,
+
+    ownerId:
+      server.ownerUsername,
+
+    ownerUsername:
+      server.ownerUsername,
+
+    memberIds,
+
+    channelIds:
+      (
+        server.channels || []
+      ).map(
+        (channel) =>
+          channel.id,
+      ),
+
+    // Server entity currently has no createdAt.
+    createdAt: null,
+  };
+}
+
+function applyServer(server) {
+  if (!server?.id) {
+    return null;
+  }
+
+  const group =
+    normalizeServer(
+      server,
+    );
+
+  const serverChannels =
+    Object.fromEntries(
+      (
+        server.channels || []
+      ).map(
+        (channel) => [
+          channel.id,
+
+          normalizeChannel(
+            channel,
+            server,
+          ),
+        ],
+      ),
+    );
+
+  for (
+    const username
+    of group.memberIds
+  ) {
+    ensureUserReference(
+      username,
+    );
+  }
+
+  updateState((s) => {
+    const channels = {
+      ...s.channels,
+    };
+
+    /*
+     * Remove old versions of channels
+     * belonging to this server.
+     */
+    for (
+      const [id, channel]
+      of Object.entries(
+        channels,
+      )
+    ) {
+      if (
+        channel.serverId ===
+        server.id
+      ) {
+        delete channels[id];
+      }
+    }
+
+    return {
+      ...s,
+
+      groups: {
+        ...s.groups,
+
+        [server.id]:
+          group,
+      },
+
+      channels: {
+        ...channels,
+        ...serverChannels,
+      },
+    };
+  });
+
+  /*
+   * Fetch public profiles for member usernames.
+   * These API calls only enrich the frontend.
+   */
+  for (
+    const username
+    of group.memberIds
+  ) {
+    if (
+      username !==
+      state.currentUserId
+    ) {
+      loadUserProfile(
+        username,
+      );
+    }
+  }
+
+  return group;
+}
+
+function applyServerList(
+  servers,
+) {
+  const groups = {};
+  const channels = {};
+  const usernames =
+    new Set();
+
+  for (
+    const server
+    of servers || []
+  ) {
+    const group =
+      normalizeServer(
+        server,
+      );
+
+    groups[
+      group.id
+    ] = group;
+
+    for (
+      const username
+      of group.memberIds
+    ) {
+      usernames.add(
+        username,
+      );
+    }
+
+    for (
+      const channel
+      of server.channels || []
+    ) {
+      channels[
+        channel.id
+      ] =
+        normalizeChannel(
+          channel,
+          server,
+        );
+    }
+  }
+
+  updateState((s) => ({
+    ...s,
+    groups,
+    channels,
+  }));
+
+  for (
+    const username
+    of usernames
+  ) {
+    ensureUserReference(
+      username,
+    );
+
+    if (
+      username !==
+      state.currentUserId
+    ) {
+      loadUserProfile(
+        username,
+      );
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Message normalization
+// -----------------------------------------------------------------------------
+
+function attachmentKind(
+  fileName,
+) {
+  const name =
+    String(fileName || '')
+      .toLowerCase();
+
+  if (
+    /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/.test(
+      name,
+    )
+  ) {
+    return 'image';
+  }
+
+  if (
+    /\.(mp4|webm|mov|mkv|avi)$/.test(
+      name,
+    )
+  ) {
+    return 'video';
+  }
+
+  if (
+    /\.(mp3|wav|ogg|m4a|aac)$/.test(
+      name,
+    )
+  ) {
+    return 'audio';
+  }
+
+  return 'file';
+}
+
+function normalizeMessage(
+  message,
+  scope,
+  scopeId,
+) {
+  const hasAttachment =
+    !!message.attachmentFileName;
+
+  return {
+    id:
+      message.id,
+
+    scope,
+    scopeId,
+
+    topicId:
+      message.topic?.id ??
+      null,
+
+    senderId:
+      message.senderUsername,
+
+    kind:
+      hasAttachment
+        ? attachmentKind(
+            message
+              .attachmentFileName,
+          )
+        : 'text',
+
+    text:
+      message.content ||
+      '',
+
+    fileName:
+      message
+        .attachmentFileName ||
+      undefined,
+
+    fileSize:
+      undefined,
+
+    dataUrl:
+      hasAttachment
+        ? `/api/media/${encodeURIComponent(
+            message
+              .attachmentFileName,
+          )}`
+        : undefined,
+
+    createdAt:
+      message.createdAt ??
+      0,
+
+    editedAt:
+      message.isEdited
+        ? (
+            message.updatedAt ??
+            message.createdAt
+          )
+        : undefined,
+  };
+}
+
+function storeMessages(
+  messages,
+  scope,
+  scopeId,
+  replace = false,
+) {
+  updateState((s) => {
+    const nextMessages =
+      replace
+        ? Object.fromEntries(
+            Object.entries(
+              s.messages,
+            ).filter(
+              (
+                [
+                  ,
+                  message,
+                ],
+              ) =>
+                !(
+                  message.scope ===
+                    scope &&
+                  message.scopeId ===
+                    scopeId
+                ),
+            ),
+          )
+        : {
+            ...s.messages,
+          };
+
+    for (
+      const message
+      of messages
+    ) {
+      nextMessages[
+        message.id
+      ] = message;
+    }
+
+    return {
+      ...s,
+      messages:
+        nextMessages,
+    };
+  });
+
+  for (
+    const message
+    of messages
+  ) {
+    ensureUserReference(
+      message.senderId,
+    );
+
+    if (
+      message.senderId !==
+      state.currentUserId
+    ) {
+      loadUserProfile(
+        message.senderId,
+      );
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// File upload helper
+// -----------------------------------------------------------------------------
+
+function dataUrlToFile(
+  dataUrl,
+  fileName,
+) {
+  if (
+    !dataUrl ||
+    !fileName
+  ) {
+    return null;
+  }
+
+  const [
+    header,
+    encoded,
+  ] =
+    dataUrl.split(',');
+
+  if (!encoded) {
+    return null;
+  }
+
+  const mime =
+    /data:([^;]+)/.exec(
+      header,
+    )?.[1] ||
+    'application/octet-stream';
+
+  const binary =
+    atob(encoded);
+
+  const bytes =
+    new Uint8Array(
+      binary.length,
+    );
+
+  for (
+    let i = 0;
+    i < binary.length;
+    i += 1
+  ) {
+    bytes[i] =
+      binary.charCodeAt(i);
+  }
+
+  return new File(
+    [bytes],
+    fileName,
+    {
+      type: mime,
+    },
+  );
+}
+
+async function uploadAttachment(
+  payload,
+) {
+  if (
+    !payload.dataUrl ||
+    !payload.fileName
+  ) {
+    return null;
+  }
+
+  const file =
+    dataUrlToFile(
+      payload.dataUrl,
+      payload.fileName,
+    );
+
+  if (!file) {
+    throw new Error(
+      'Could not prepare the attachment for upload.',
+    );
+  }
+
+  const formData =
+    new FormData();
+
+  formData.append(
+    'file',
+    file,
+  );
+
+  return api(
+    '/api/media/upload',
+    {
+      method: 'POST',
+      formData,
+    },
+  );
+}
+
+// =============================================================================
+// INITIALIZATION
+// =============================================================================
+
+export async function bootstrap() {
+  if (state.initialized) {
+    return ok();
+  }
+
+  if (
+    !getAccessToken() &&
+    !getRefreshToken()
+  ) {
+    updateState((s) => ({
+      ...s,
+      initialized: true,
+    }));
+
+    return ok();
+  }
+
+  try {
+    const profile =
+      await api(
+        '/api/v1/users/me',
+      );
+
+    const user =
+      userFromApi(
+        profile,
+      );
+
+    updateState((s) => ({
+      ...s,
+
+      initialized: true,
+
+      currentUserId:
+        user.id,
+
+      users: {
+        ...s.users,
+
+        [user.id]:
+          user,
+      },
+    }));
+
+    await loadServers();
+
+    return ok(user);
+  } catch (error) {
+    clearTokens();
+
+    updateState((s) => ({
+      ...s,
+
+      initialized: true,
+
+      currentUserId:
+        null,
+
+      users: {},
+      dms: {},
+      groups: {},
+      channels: {},
+      messages: {},
+    }));
+
+    return fail(error);
+  }
+}
+
+// =============================================================================
+// AUTH
+// =============================================================================
+
+export async function register({
+  name,
+  email,
+  username,
+  password,
+}) {
+  try {
+    const {
+      firstName,
+      lastName,
+    } =
+      splitName(name);
+
+    await api(
+      '/api/v1/users/register',
+      {
+        method:
+          'POST',
+
+        auth:
+          false,
+
+        body: {
+          username,
+          email,
+          password,
+          firstName,
+          lastName,
+        },
+      },
+    );
+
+    /*
+     * Register endpoint only returns a String.
+     * Login immediately so frontend receives
+     * tokens and the real UserProfile.
+     */
+    return login({
+      username,
+      password,
+    });
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function login({
+  username,
+  password,
+}) {
+  try {
+    const tokens =
+      await api(
+        '/api/v1/users/login',
+        {
+          method:
+            'POST',
+
+          auth:
+            false,
+
+          body: {
+            username,
+            password,
+          },
+        },
+      );
+
+    saveTokens(tokens);
+
+    const profile =
+      await api(
+        '/api/v1/users/me',
+      );
+
+    const user =
+      userFromApi(
+        profile,
+      );
+
+    updateState((s) => ({
+      ...s,
+
+      initialized: true,
+
+      currentUserId:
+        user.id,
+
+      users: {
+        [user.id]:
+          user,
+      },
+
+      dms: {},
+      groups: {},
+      channels: {},
+      messages: {},
+    }));
+
+    await loadServers();
+
+    /*
+     * Presence isn't essential to login.
+     */
+    api(
+      '/api/v1/presence/online',
+      {
+        method: 'POST',
+      },
+    ).catch(() => {});
+
+    return ok(user);
+  } catch (error) {
+    clearTokens();
+
+    return fail(error);
+  }
+}
+
+export async function logout() {
+  const refreshToken =
+    getRefreshToken();
+
+  try {
+    await api(
+      '/api/v1/presence/offline',
+      {
+        method: 'POST',
+      },
+    );
+  } catch {
+    // Continue logout.
+  }
+
+  try {
+    if (refreshToken) {
+      await api(
+        '/api/v1/users/logout',
+        {
+          method:
+            'POST',
+
+          body: {
+            refreshToken,
+          },
+        },
+      );
+    }
+  } catch {
+    // Still clear frontend session.
+  }
+
+  clearTokens();
+
+  updateState((s) => ({
+    ...s,
+
+    currentUserId:
+      null,
+
     users: {},
     dms: {},
     groups: {},
     channels: {},
     messages: {},
-    notifications: {},
-    scheduledMessages: {},
-    outbox: {},
-  };
+  }));
+
+  return ok();
 }
 
-function makeChannelRoles() {
-  const now = Date.now();
-  const adminRole = { id: makeId('role'), name: 'Admin', permissions: { ...ALL_PERMS_TRUE }, isDefault: false, createdAt: now };
-  const memberRole = { id: makeId('role'), name: 'Member', permissions: { ...ALL_PERMS_FALSE }, isDefault: true, createdAt: now };
-  return { adminRole, memberRole };
-}
-
-function seed(db) {
-  const mkUser = (username, name, email, bio) => ({
-    id: makeId('u'),
-    username,
-    usernameLower: username.toLowerCase(),
-    name,
-    email,
-    bio: bio || '',
-    password: '123456',
-    allowAddToGroup: true,
-    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 30,
-  });
-
-  const sara = mkUser('sara_dev', 'Sara Ahmadi', 'sara@example.com', 'Frontend engineer. Coffee-powered.');
-  const ali = mkUser('ali_designer', 'Ali Rezaei', 'ali@example.com', 'Product designer.');
-  const reza = mkUser('reza_pm', 'Reza Karimi', 'reza@example.com', 'Product manager.');
-  [sara, ali, reza].forEach((u) => {
-    db.users[u.id] = u;
-  });
-
-  const channelId = makeId('ch');
-  const topicGeneral = { id: makeId('tp'), name: 'General', createdAt: Date.now() };
-  const topicAnnounce = { id: makeId('tp'), name: 'Announcements', createdAt: Date.now() };
-  const { adminRole, memberRole } = makeChannelRoles(sara.id);
-  db.channels[channelId] = {
-    id: channelId,
-    name: 'Main Channel',
-    ownerId: sara.id,
-    mediaAllowed: true,
-    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 20,
-    memberIds: [sara.id, ali.id, reza.id],
-    topics: { [topicGeneral.id]: topicGeneral, [topicAnnounce.id]: topicAnnounce },
-    roles: { [adminRole.id]: adminRole, [memberRole.id]: memberRole },
-    memberRoles: { [ali.id]: adminRole.id, [reza.id]: memberRole.id },
-    defaultRoleId: memberRole.id,
-  };
-  const msg1 = {
-    id: makeId('m'),
-    scope: 'channel',
-    scopeId: channelId,
-    topicId: topicGeneral.id,
-    senderId: sara.id,
-    kind: 'text',
-    text: 'Welcome to the main channel! \ud83d\udc4b',
-    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 20,
-  };
-  db.messages[msg1.id] = msg1;
-
-  const groupId = makeId('g');
-  db.groups[groupId] = {
-    id: groupId,
-    name: 'Group chat',
-    ownerId: sara.id,
-    memberIds: [sara.id, ali.id, reza.id],
-    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 15,
-  };
-  const msg2 = {
-    id: makeId('m'),
-    scope: 'group',
-    scopeId: groupId,
-    senderId: ali.id,
-    kind: 'text',
-    text: 'Hey everyone!',
-    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 15,
-  };
-  db.messages[msg2.id] = msg2;
-
-  return db;
-}
-
-function migrate(parsed) {
-  // Merge with a fresh empty DB so older/newer shapes never crash the app.
-  const base = emptyDb();
-  const merged = { ...base, ...parsed };
-  merged.users = parsed.users || {};
-  merged.dms = parsed.dms || {};
-  merged.groups = parsed.groups || {};
-  merged.channels = parsed.channels || {};
-  merged.messages = parsed.messages || {};
-  merged.notifications = parsed.notifications || {};
-  merged.scheduledMessages = parsed.scheduledMessages || {};
-  merged.outbox = parsed.outbox || {};
-  merged.simulateOffline = !!parsed.simulateOffline;
-
-  // Backfill any user missing the newer `bio` field.
-  Object.values(merged.users).forEach((u) => {
-    if (u.bio === undefined) u.bio = '';
-  });
-
-  // Backfill channels created under the old adminIds model into the roles model.
-  Object.values(merged.channels).forEach((c) => {
-    if (!c.roles) {
-      const { adminRole, memberRole } = makeChannelRoles(c.ownerId);
-      const memberRoles = {};
-      (c.memberIds || []).forEach((uid) => {
-        if (uid === c.ownerId) return;
-        memberRoles[uid] = (c.adminIds || []).includes(uid) ? adminRole.id : memberRole.id;
-      });
-      c.roles = { [adminRole.id]: adminRole, [memberRole.id]: memberRole };
-      c.memberRoles = memberRoles;
-      c.defaultRoleId = memberRole.id;
-      delete c.adminIds;
-    }
-  });
-
-  return merged;
-}
-
-function load() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return seed(emptyDb());
-    const parsed = JSON.parse(raw);
-    return migrate(parsed);
-  } catch {
-    return seed(emptyDb());
-  }
-}
-
-let db = load();
-const listeners = new Set();
-
-function persist() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-  } catch (e) {
-    console.warn('Persist failed', e);
-  }
-  listeners.forEach((cb) => cb());
-}
-
-function mutate(fn) {
-  db = { ...db };
-  fn(db);
-  persist();
-}
-
-// Like mutate, but doesn't persist to localStorage — used for purely
-// transient UI state (e.g. reacting to a browser online/offline event).
-function touch(fn) {
-  db = { ...db };
-  if (fn) fn(db);
-  listeners.forEach((cb) => cb());
-}
-
-export function subscribe(cb) {
-  listeners.add(cb);
-  return () => listeners.delete(cb);
-}
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (e) => {
-    if (e.key === STORAGE_KEY) {
-      db = load();
-      listeners.forEach((cb) => cb());
-    }
-  });
-  window.addEventListener('online', () => {
-    touch();
-    flushOutbox();
-  });
-  window.addEventListener('offline', () => {
-    touch();
-  });
-}
-
-export function getSnapshot() {
-  return db;
-}
-
-// ---------------------------------------------------------------------------
-// Connection simulation (for testing "offline" behaviour without a real
-// backend or network toggle)
-// ---------------------------------------------------------------------------
-
-export function isOffline() {
-  const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
-  return db.simulateOffline || browserOffline;
-}
-
-export function setSimulateOffline(value) {
-  mutate((d) => {
-    d.simulateOffline = value;
-  });
-  if (!value) flushOutbox();
-  return { ok: true };
-}
-
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-export function register({ name, email, username, password }) {
-  name = (name || '').trim();
-  email = (email || '').trim();
-  username = (username || '').trim();
-
-  if (!name || !email || !username || !password) {
-    return { ok: false, error: 'All fields are required.' };
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { ok: false, error: 'Please enter a valid email address.' };
-  }
-  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-    return { ok: false, error: 'Username must be 3-20 characters (letters, numbers, or _).' };
-  }
-  if (password.length < 6) {
-    return { ok: false, error: 'Password must be at least 6 characters.' };
-  }
-
-  const usernameLower = username.toLowerCase();
-  const emailLower = email.toLowerCase();
-  const exists = Object.values(db.users).some(
-    (u) => u.usernameLower === usernameLower || u.email.toLowerCase() === emailLower
-  );
-  if (exists) {
-    return { ok: false, error: 'This username or email is already registered.' };
-  }
-
-  const user = {
-    id: makeId('u'),
-    username,
-    usernameLower,
-    name,
-    email,
-    bio: '',
-    password,
-    allowAddToGroup: true,
-    createdAt: Date.now(),
-  };
-
-  mutate((d) => {
-    d.users = { ...d.users, [user.id]: user };
-    d.currentUserId = user.id;
-  });
-
-  return { ok: true, data: user };
-}
-
-export function login({ username, password }) {
-  username = (username || '').trim();
-  if (!username || !password) {
-    return { ok: false, error: 'Enter your username and password.' };
-  }
-  const usernameLower = username.toLowerCase();
-  const user = Object.values(db.users).find((u) => u.usernameLower === usernameLower);
-  if (!user || user.password !== password) {
-    return { ok: false, error: 'Incorrect username or password.' };
-  }
-  mutate((d) => {
-    d.currentUserId = user.id;
-  });
-  return { ok: true, data: user };
-}
-
-export function logout() {
-  mutate((d) => {
-    d.currentUserId = null;
-  });
-}
+// =============================================================================
+// USERS
+// =============================================================================
 
 export function getCurrentUser() {
-  return db.currentUserId ? db.users[db.currentUserId] : null;
-}
+  if (!state.currentUserId) {
+    return null;
+  }
 
-// ---------------------------------------------------------------------------
-// Users / profiles
-// ---------------------------------------------------------------------------
-
-export function listOtherUsers(excludeId) {
-  return Object.values(db.users)
-    .filter((u) => u.id !== excludeId)
-    .sort((a, b) => a.username.localeCompare(b.username));
+  return (
+    state.users[
+      state.currentUserId
+    ] || null
+  );
 }
 
 export function getUser(id) {
-  return db.users[id] || null;
-}
-
-export function setAllowAddToGroup(userId, allow) {
-  mutate((d) => {
-    if (d.users[userId]) d.users[userId] = { ...d.users[userId], allowAddToGroup: allow };
-  });
-  return { ok: true };
-}
-
-// Edits every profile field except username, and only for your own account.
-export function updateProfile(userId, actorId, { name, email, bio }) {
-  if (userId !== actorId) {
-    return { ok: false, error: 'You can only edit your own profile.' };
-  }
-  const user = db.users[userId];
-  if (!user) return { ok: false, error: 'User not found.' };
-
-  name = name !== undefined ? name.trim() : user.name;
-  email = email !== undefined ? email.trim() : user.email;
-  bio = bio !== undefined ? bio : user.bio;
-
-  if (!name) return { ok: false, error: 'Name cannot be empty.' };
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { ok: false, error: 'Please enter a valid email address.' };
-  }
-  const emailTaken = Object.values(db.users).some(
-    (u) => u.id !== userId && u.email.toLowerCase() === email.toLowerCase()
+  return (
+    state.users[id] ||
+    null
   );
-  if (emailTaken) return { ok: false, error: 'That email is already in use by another account.' };
-  if (bio && bio.length > 240) return { ok: false, error: 'Bio must be 240 characters or fewer.' };
-
-  mutate((d) => {
-    d.users[userId] = { ...d.users[userId], name, email, bio };
-  });
-  return { ok: true };
 }
 
-// ---------------------------------------------------------------------------
-// Direct messages
-// ---------------------------------------------------------------------------
-
-export function getOrCreateDm(userA, userB) {
-  const existing = Object.values(db.dms).find(
-    (c) => c.memberIds.includes(userA) && c.memberIds.includes(userB)
-  );
-  if (existing) return existing;
-  const dm = { id: makeId('dm'), memberIds: [userA, userB], createdAt: Date.now() };
-  mutate((d) => {
-    d.dms = { ...d.dms, [dm.id]: dm };
-  });
-  return dm;
+export function listOtherUsers(
+  excludeId,
+) {
+  /*
+   * IMPORTANT:
+   *
+   * Backend has no "list all users" API.
+   *
+   * Therefore this only returns users the frontend
+   * has learned about from server membership,
+   * messages, DMs, etc.
+   */
+  return Object.values(
+    state.users,
+  )
+    .filter(
+      (user) =>
+        user.id !==
+        excludeId,
+    )
+    .sort(
+      (a, b) =>
+        a.username.localeCompare(
+          b.username,
+        ),
+    );
 }
 
-export function listDmsForUser(userId) {
-  return Object.values(db.dms).filter((c) => c.memberIds.includes(userId));
-}
+export async function fetchUser(
+  username,
+) {
+  try {
+    const user =
+      await loadUserProfile(
+        username,
+      );
 
-export function getDm(id) {
-  return db.dms[id] || null;
-}
-
-// ---------------------------------------------------------------------------
-// Groups
-// ---------------------------------------------------------------------------
-
-export function createGroup({ name, creatorId, memberIds }) {
-  name = (name || '').trim();
-  if (!name) return { ok: false, error: 'Group name is required.' };
-  const uniqueMembers = Array.from(new Set(memberIds));
-  if (uniqueMembers.length < 1) {
-    return { ok: false, error: 'Select at least one other member.' };
+    return ok(user);
+  } catch (error) {
+    return fail(error);
   }
-  const blocked = uniqueMembers
-    .map((id) => db.users[id])
-    .filter((u) => u && u.allowAddToGroup === false);
-  if (blocked.length > 0) {
-    return {
-      ok: false,
-      error: `Can't add ${blocked.map((u) => '@' + u.username).join(', ')} \u2014 this user has turned off being added to groups.`,
-    };
-  }
+}
 
-  const group = {
-    id: makeId('g'),
+export async function updateProfile(
+  userId,
+  actorId,
+  {
     name,
-    ownerId: creatorId,
-    memberIds: Array.from(new Set([creatorId, ...uniqueMembers])),
-    createdAt: Date.now(),
-  };
-  mutate((d) => {
-    d.groups = { ...d.groups, [group.id]: group };
-  });
-  return { ok: true, data: group };
+    bio,
+  },
+) {
+  if (
+    userId !== actorId
+  ) {
+    return fail(
+      'You can only edit your own profile.',
+    );
+  }
+
+  const current =
+    state.users[userId];
+
+  if (!current) {
+    return fail(
+      'User not found.',
+    );
+  }
+
+  try {
+    const {
+      firstName,
+      lastName,
+    } =
+      splitName(
+        name ||
+        current.name,
+      );
+
+    const profile =
+      await api(
+        '/api/v1/users/me',
+        {
+          method:
+            'PUT',
+
+          body: {
+            username:
+              current.username,
+
+            firstName,
+            lastName,
+
+            bio:
+              bio ??
+              current.bio ??
+              '',
+
+            avatarUrls:
+              current.avatarUrls ||
+              [],
+
+            allowGroupAdditions:
+              current.allowAddToGroup !==
+              false,
+          },
+        },
+      );
+
+    const user =
+      cacheUser(
+        profile,
+      );
+
+    return ok(user);
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function listGroupsForUser(userId) {
-  return Object.values(db.groups).filter((g) => g.memberIds.includes(userId));
+export async function setAllowAddToGroup(
+  userId,
+  allow,
+) {
+  const current =
+    state.users[userId];
+
+  if (!current) {
+    return fail(
+      'User not found.',
+    );
+  }
+
+  try {
+    const {
+      firstName,
+      lastName,
+    } =
+      splitName(
+        current.name,
+      );
+
+    const profile =
+      await api(
+        '/api/v1/users/me',
+        {
+          method:
+            'PUT',
+
+          body: {
+            username:
+              current.username,
+
+            firstName,
+            lastName,
+
+            bio:
+              current.bio ||
+              '',
+
+            avatarUrls:
+              current.avatarUrls ||
+              [],
+
+            allowGroupAdditions:
+              !!allow,
+          },
+        },
+      );
+
+    const user =
+      cacheUser(
+        profile,
+      );
+
+    return ok(user);
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+// =============================================================================
+// SERVERS / GROUPS
+// =============================================================================
+
+export async function loadServers() {
+  try {
+    const servers =
+      await api(
+        '/api/v1/servers',
+      );
+
+    applyServerList(
+      servers,
+    );
+
+    return ok(servers);
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function loadServer(
+  serverId,
+) {
+  try {
+    const server =
+      await api(
+        `/api/v1/servers/${serverId}`,
+      );
+
+    applyServer(server);
+
+    return ok(
+      state.groups[
+        server.id
+      ],
+    );
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export function listGroupsForUser() {
+  return Object.values(
+    state.groups,
+  );
 }
 
 export function getGroup(id) {
-  return db.groups[id] || null;
+  return (
+    state.groups[id] ||
+    null
+  );
 }
 
-export function renameGroup(groupId, newName, actorId) {
-  const group = db.groups[groupId];
-  if (!group) return { ok: false, error: 'Group not found.' };
-  if (!group.memberIds.includes(actorId)) {
-    return { ok: false, error: 'You are not a member of this group.' };
+export async function createGroup({
+  name,
+  memberIds = [],
+}) {
+  try {
+    /*
+     * Since our frontend user IDs are usernames,
+     * memberIds can be sent directly.
+     */
+    const server =
+      await api(
+        '/api/v1/servers',
+        {
+          method:
+            'POST',
+
+          body: {
+            name,
+
+            iconUrl:
+              null,
+
+            initialMemberUsernames:
+              memberIds,
+          },
+        },
+      );
+
+    /*
+     * Reload it because ServerService creates
+     * default roles/members after saving.
+     */
+    await loadServer(
+      server.id,
+    );
+
+    return ok(
+      state.groups[
+        server.id
+      ],
+    );
+  } catch (error) {
+    return fail(error);
   }
-  newName = (newName || '').trim();
-  if (!newName) return { ok: false, error: 'Group name cannot be empty.' };
-  mutate((d) => {
-    d.groups[groupId] = { ...d.groups[groupId], name: newName };
-  });
-  return { ok: true };
 }
 
-export function deleteGroup(groupId, actorId) {
-  const group = db.groups[groupId];
-  if (!group) return { ok: false, error: 'Group not found.' };
-  if (!group.memberIds.includes(actorId)) {
-    return { ok: false, error: 'You are not a member of this group.' };
+export async function renameGroup(
+  groupId,
+  newName,
+) {
+  try {
+    await api(
+      `/api/v1/servers/${groupId}/name`,
+      {
+        method:
+          'PUT',
+
+        body: {
+          name:
+            newName,
+        },
+      },
+    );
+
+    await loadServer(
+      groupId,
+    );
+
+    return ok(
+      state.groups[
+        groupId
+      ],
+    );
+  } catch (error) {
+    return fail(error);
   }
-  mutate((d) => {
-    const { [groupId]: _removed, ...rest } = d.groups;
-    d.groups = rest;
-    const nextMessages = { ...d.messages };
-    Object.values(nextMessages).forEach((m) => {
-      if (m.scope === 'group' && m.scopeId === groupId) delete nextMessages[m.id];
+}
+
+export async function deleteGroup(
+  groupId,
+) {
+  try {
+    await api(
+      `/api/v1/servers/${groupId}`,
+      {
+        method:
+          'DELETE',
+      },
+    );
+
+    updateState((s) => {
+      const groups = {
+        ...s.groups,
+      };
+
+      const channels = {
+        ...s.channels,
+      };
+
+      const messages = {
+        ...s.messages,
+      };
+
+      delete groups[
+        groupId
+      ];
+
+      for (
+        const [
+          id,
+          channel,
+        ]
+        of Object.entries(
+          channels,
+        )
+      ) {
+        if (
+          channel.serverId ===
+          groupId
+        ) {
+          delete channels[id];
+
+          for (
+            const [
+              messageId,
+              message,
+            ]
+            of Object.entries(
+              messages,
+            )
+          ) {
+            if (
+              message.scopeId ===
+              channel.id
+            ) {
+              delete messages[
+                messageId
+              ];
+            }
+          }
+        }
+      }
+
+      return {
+        ...s,
+        groups,
+        channels,
+        messages,
+      };
     });
-    d.messages = nextMessages;
-  });
-  return { ok: true };
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function addMemberToGroup(groupId, userId, actorId) {
-  const group = db.groups[groupId];
-  if (!group) return { ok: false, error: 'Group not found.' };
-  if (!group.memberIds.includes(actorId)) {
-    return { ok: false, error: 'You are not a member of this group.' };
+export async function addMemberToGroup(
+  groupId,
+  userId,
+) {
+  try {
+    await api(
+      `/api/v1/servers/${groupId}/members`,
+      {
+        method:
+          'POST',
+
+        body: {
+          username:
+            userId,
+        },
+      },
+    );
+
+    await loadServer(
+      groupId,
+    );
+
+    await loadUserProfile(
+      userId,
+    );
+
+    return ok();
+  } catch (error) {
+    return fail(error);
   }
-  const target = db.users[userId];
-  if (!target) return { ok: false, error: 'User not found.' };
-  if (group.memberIds.includes(userId)) {
-    return { ok: false, error: 'This user is already a member of the group.' };
-  }
-  if (target.allowAddToGroup === false) {
-    return { ok: false, error: `@${target.username} has turned off being added to groups.` };
-  }
-  mutate((d) => {
-    d.groups[groupId] = { ...d.groups[groupId], memberIds: [...d.groups[groupId].memberIds, userId] };
-  });
-  return { ok: true };
 }
 
-// ---------------------------------------------------------------------------
-// Channels — membership, topics
-// ---------------------------------------------------------------------------
+export async function leaveGroup(
+  groupId,
+) {
+  try {
+    await api(
+      `/api/v1/servers/${groupId}/leave`,
+      {
+        method:
+          'DELETE',
+      },
+    );
 
-export function createChannel({ name, ownerId }) {
-  name = (name || '').trim();
-  if (!name) return { ok: false, error: 'Channel name is required.' };
-  const topic = { id: makeId('tp'), name: 'General', createdAt: Date.now() };
-  const { adminRole, memberRole } = makeChannelRoles(ownerId);
-  const channel = {
-    id: makeId('ch'),
-    name,
-    ownerId,
-    mediaAllowed: true,
-    createdAt: Date.now(),
-    memberIds: [ownerId],
-    topics: { [topic.id]: topic },
-    roles: { [adminRole.id]: adminRole, [memberRole.id]: memberRole },
-    memberRoles: {},
-    defaultRoleId: memberRole.id,
-  };
-  mutate((d) => {
-    d.channels = { ...d.channels, [channel.id]: channel };
-  });
-  return { ok: true, data: channel };
+    await loadServers();
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function listChannelsForUser(userId) {
-  return Object.values(db.channels).filter((c) => c.memberIds.includes(userId));
+export async function banGroupMember(
+  groupId,
+  username,
+) {
+  try {
+    await api(
+      `/api/v1/servers/${groupId}/members/${encodeURIComponent(
+        username,
+      )}/ban`,
+      {
+        method:
+          'POST',
+      },
+    );
+
+    await loadServer(
+      groupId,
+    );
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+// =============================================================================
+// CHANNELS
+// =============================================================================
+
+export function listChannelsForUser() {
+  return Object.values(
+    state.channels,
+  ).filter(
+    (channel) =>
+      channel.type !==
+      'DIRECT',
+  );
 }
 
 export function getChannel(id) {
-  return db.channels[id] || null;
+  return (
+    state.channels[id] ||
+    null
+  );
 }
 
-// ---- Roles & permissions ---------------------------------------------------
+export async function createChannel({
+  name,
+  serverId,
+  type = 'TEXT',
+}) {
+  try {
+    const channel =
+      await api(
+        '/api/v1/channels',
+        {
+          method:
+            'POST',
 
-const OWNER_ROLE = Object.freeze({ id: 'owner', name: 'Owner', permissions: Object.freeze({ ...ALL_PERMS_TRUE }) });
+          body: {
+            name,
+            type,
 
-export function getChannelRole(channel, userId) {
-  if (!channel) return null;
-  if (channel.ownerId === userId) return OWNER_ROLE;
-  const roleId = channel.memberRoles[userId];
-  return roleId ? channel.roles[roleId] : null;
-}
+            serverId:
+              Number(
+                serverId,
+              ),
+          },
+        },
+      );
 
-export function channelHasPermission(channel, userId, permKey) {
-  const role = getChannelRole(channel, userId);
-  return !!(role && role.permissions[permKey]);
-}
+    await loadServer(
+      serverId,
+    );
 
-export function getChannelPermissions(channel, userId) {
-  const role = getChannelRole(channel, userId);
-  return role ? { ...role.permissions } : { ...ALL_PERMS_FALSE };
-}
-
-export function listChannelRoles(channel) {
-  return [OWNER_ROLE, ...Object.values(channel.roles)];
-}
-
-function requirePermission(channel, actorId, permKey, message) {
-  if (!channelHasPermission(channel, actorId, permKey)) {
-    return { ok: false, error: message };
+    return ok(
+      state.channels[
+        channel.id
+      ] ||
+      channel,
+    );
+  } catch (error) {
+    return fail(error);
   }
-  return { ok: true };
 }
 
-export function renameChannel(channelId, newName, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageChannel', "You don't have permission to manage this channel.");
-  if (!perm.ok) return perm;
-  newName = (newName || '').trim();
-  if (!newName) return { ok: false, error: 'Channel name cannot be empty.' };
-  mutate((d) => {
-    d.channels[channelId] = { ...d.channels[channelId], name: newName };
-  });
-  return { ok: true };
+export async function renameChannel(
+  channelId,
+  newName,
+) {
+  const channel =
+    state.channels[
+      channelId
+    ];
+
+  try {
+    await api(
+      `/api/v1/channels/${channelId}/name`,
+      {
+        method:
+          'PUT',
+
+        body: {
+          name:
+            newName,
+        },
+      },
+    );
+
+    if (
+      channel?.serverId
+    ) {
+      await loadServer(
+        channel.serverId,
+      );
+    }
+
+    return ok(
+      state.channels[
+        channelId
+      ],
+    );
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function deleteChannel(channelId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageChannel', "You don't have permission to manage this channel.");
-  if (!perm.ok) return perm;
-  mutate((d) => {
-    const { [channelId]: _removed, ...rest } = d.channels;
-    d.channels = rest;
-    const nextMessages = { ...d.messages };
-    Object.values(nextMessages).forEach((m) => {
-      if (m.scope === 'channel' && m.scopeId === channelId) delete nextMessages[m.id];
+export async function deleteChannel(
+  channelId,
+) {
+  const channel =
+    state.channels[
+      channelId
+    ];
+
+  try {
+    await api(
+      `/api/v1/channels/${channelId}`,
+      {
+        method:
+          'DELETE',
+      },
+    );
+
+    updateState((s) => {
+      const channels = {
+        ...s.channels,
+      };
+
+      const messages = {
+        ...s.messages,
+      };
+
+      delete channels[
+        channelId
+      ];
+
+      for (
+        const [
+          id,
+          message,
+        ]
+        of Object.entries(
+          messages,
+        )
+      ) {
+        if (
+          message.scopeId ===
+          channelId
+        ) {
+          delete messages[id];
+        }
+      }
+
+      return {
+        ...s,
+        channels,
+        messages,
+      };
     });
-    d.messages = nextMessages;
-  });
-  return { ok: true };
+
+    if (
+      channel?.serverId
+    ) {
+      await loadServer(
+        channel.serverId,
+      );
+    }
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function addMemberToChannel(channelId, userId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageMembers', "You don't have permission to add members.");
-  if (!perm.ok) return perm;
-  if (channel.memberIds.includes(userId)) {
-    return { ok: false, error: 'This user is already a member of the channel.' };
+export async function toggleChannelMedia(
+  channelId,
+) {
+  const channel =
+    state.channels[
+      channelId
+    ];
+
+  if (!channel) {
+    return fail(
+      'Channel not found.',
+    );
   }
-  mutate((d) => {
-    const ch = d.channels[channelId];
-    d.channels[channelId] = {
-      ...ch,
-      memberIds: [...ch.memberIds, userId],
-      memberRoles: { ...ch.memberRoles, [userId]: ch.defaultRoleId },
-    };
-  });
-  return { ok: true };
+
+  try {
+    /*
+     * Backend accepts isRestricted.
+     * Frontend stores mediaAllowed.
+     */
+    const isRestricted =
+      channel.mediaAllowed;
+
+    await api(
+      `/api/v1/channels/${channelId}/media-restriction?isRestricted=${isRestricted}`,
+      {
+        method:
+          'PUT',
+      },
+    );
+
+    if (
+      channel.serverId
+    ) {
+      await loadServer(
+        channel.serverId,
+      );
+    }
+
+    return ok(
+      state.channels[
+        channelId
+      ],
+    );
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function assignChannelRole(channelId, targetUserId, roleId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  if (targetUserId === channel.ownerId) {
-    return { ok: false, error: "The channel owner's role can't be changed." };
+/*
+ * Backend has no channel-specific add-member API.
+ *
+ * A channel belongs to a server, so adding a member
+ * means adding them to the server.
+ */
+export async function addMemberToChannel(
+  channelId,
+  userId,
+) {
+  const channel =
+    state.channels[
+      channelId
+    ];
+
+  if (
+    !channel?.serverId
+  ) {
+    return fail(
+      'This channel is not attached to a server.',
+    );
   }
-  if (!channel.memberIds.includes(targetUserId)) {
-    return { ok: false, error: 'This user is not a member of the channel.' };
-  }
-  const perm = requirePermission(channel, actorId, 'manageMembers', "You don't have permission to change member roles.");
-  if (!perm.ok) return perm;
-  if (!channel.roles[roleId]) {
-    return { ok: false, error: 'Role not found.' };
-  }
-  mutate((d) => {
-    d.channels[channelId] = {
-      ...d.channels[channelId],
-      memberRoles: { ...d.channels[channelId].memberRoles, [targetUserId]: roleId },
-    };
-  });
-  return { ok: true };
+
+  return addMemberToGroup(
+    channel.serverId,
+    userId,
+  );
 }
 
-export function createChannelRole(channelId, name, permissions, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageRoles', "You don't have permission to manage roles.");
-  if (!perm.ok) return perm;
-  name = (name || '').trim();
-  if (!name) return { ok: false, error: 'Role name is required.' };
-  const role = { id: makeId('role'), name, permissions: { ...ALL_PERMS_FALSE, ...permissions }, isDefault: false, createdAt: Date.now() };
-  mutate((d) => {
-    d.channels[channelId] = {
-      ...d.channels[channelId],
-      roles: { ...d.channels[channelId].roles, [role.id]: role },
-    };
-  });
-  return { ok: true, data: role };
+export async function assignChannelRole(
+  channelId,
+  targetUserId,
+  roleId,
+) {
+  const channel =
+    state.channels[
+      channelId
+    ];
+
+  try {
+    await api(
+      `/api/v1/channels/${channelId}/members/role`,
+      {
+        method:
+          'PUT',
+
+        body: {
+          targetUsername:
+            targetUserId,
+
+          newRoleId:
+            Number(roleId),
+        },
+      },
+    );
+
+    if (
+      channel?.serverId
+    ) {
+      await loadServer(
+        channel.serverId,
+      );
+    }
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function updateChannelRole(channelId, roleId, patch, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageRoles', "You don't have permission to manage roles.");
-  if (!perm.ok) return perm;
-  const role = channel.roles[roleId];
-  if (!role) return { ok: false, error: 'Role not found.' };
-  const nextName = patch.name !== undefined ? patch.name.trim() : role.name;
-  if (!nextName) return { ok: false, error: 'Role name cannot be empty.' };
-  const nextPermissions = patch.permissions ? { ...role.permissions, ...patch.permissions } : role.permissions;
-  mutate((d) => {
-    d.channels[channelId] = {
-      ...d.channels[channelId],
-      roles: {
-        ...d.channels[channelId].roles,
-        [roleId]: { ...role, name: nextName, permissions: nextPermissions },
+// -----------------------------------------------------------------------------
+// Channel permission selectors
+// -----------------------------------------------------------------------------
+
+export function getChannelRole(
+  channel,
+  userId,
+) {
+  if (!channel) {
+    return null;
+  }
+
+  if (
+    channel.ownerId ===
+    userId
+  ) {
+    return {
+      id: 'owner',
+      name: 'OWNER',
+
+      permissions: {
+        post: true,
+        deleteAnyMessage: true,
+        manageMembers: true,
+        manageTopics: true,
+        manageChannel: true,
+        manageRoles: true,
       },
     };
-  });
-  return { ok: true };
-}
-
-export function deleteChannelRole(channelId, roleId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageRoles', "You don't have permission to manage roles.");
-  if (!perm.ok) return perm;
-  if (roleId === channel.defaultRoleId) {
-    return { ok: false, error: "The default role can't be deleted." };
   }
-  if (!channel.roles[roleId]) return { ok: false, error: 'Role not found.' };
-  mutate((d) => {
-    const ch = d.channels[channelId];
-    const { [roleId]: _removed, ...restRoles } = ch.roles;
-    const nextMemberRoles = { ...ch.memberRoles };
-    Object.keys(nextMemberRoles).forEach((uid) => {
-      if (nextMemberRoles[uid] === roleId) nextMemberRoles[uid] = ch.defaultRoleId;
-    });
-    d.channels[channelId] = { ...ch, roles: restRoles, memberRoles: nextMemberRoles };
-  });
-  return { ok: true };
+
+  const roleId =
+    channel.memberRoles?.[
+      userId
+    ];
+
+  if (
+    roleId == null
+  ) {
+    return null;
+  }
+
+  return (
+    channel.roles?.[
+      roleId
+    ] || null
+  );
 }
 
-export function createTopic(channelId, name, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageTopics', "You don't have permission to create topics.");
-  if (!perm.ok) return perm;
-  name = (name || '').trim();
-  if (!name) return { ok: false, error: 'Topic name is required.' };
-  const topic = { id: makeId('tp'), name, createdAt: Date.now() };
-  mutate((d) => {
-    d.channels[channelId] = {
-      ...d.channels[channelId],
-      topics: { ...d.channels[channelId].topics, [topic.id]: topic },
-    };
-  });
-  return { ok: true, data: topic };
+export function getChannelPermissions(
+  channel,
+  userId,
+) {
+  return (
+    getChannelRole(
+      channel,
+      userId,
+    )?.permissions ||
+    {
+      post: false,
+      deleteAnyMessage: false,
+      manageMembers: false,
+      manageTopics: false,
+      manageChannel: false,
+      manageRoles: false,
+    }
+  );
 }
 
-export function deleteTopic(channelId, topicId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageTopics', "You don't have permission to delete topics.");
-  if (!perm.ok) return perm;
-  mutate((d) => {
-    const { [topicId]: _removed, ...restTopics } = d.channels[channelId].topics;
-    d.channels[channelId] = { ...d.channels[channelId], topics: restTopics };
-    const nextMessages = { ...d.messages };
-    Object.values(nextMessages).forEach((m) => {
-      if (m.scope === 'channel' && m.scopeId === channelId && m.topicId === topicId) {
-        delete nextMessages[m.id];
+export function channelHasPermission(
+  channel,
+  userId,
+  key,
+) {
+  return !!getChannelPermissions(
+    channel,
+    userId,
+  )[key];
+}
+
+export function listChannelRoles(
+  channel,
+) {
+  if (!channel) {
+    return [];
+  }
+
+  return Object.values(
+    channel.roles || {},
+  );
+}
+
+// =============================================================================
+// TOPICS
+// =============================================================================
+
+export async function createTopic(
+  channelId,
+  name,
+) {
+  try {
+    const topic =
+      await api(
+        '/api/v1/topics',
+        {
+          method:
+            'POST',
+
+          body: {
+            channelId:
+              Number(
+                channelId,
+              ),
+
+            name,
+          },
+        },
+      );
+
+    const normalized =
+      normalizeTopic(
+        topic,
+      );
+
+    updateState((s) => {
+      const channel =
+        s.channels[
+          channelId
+        ];
+
+      if (!channel) {
+        return s;
       }
+
+      return {
+        ...s,
+
+        channels: {
+          ...s.channels,
+
+          [channelId]: {
+            ...channel,
+
+            topics: {
+              ...channel.topics,
+
+              [normalized.id]:
+                normalized,
+            },
+          },
+        },
+      };
     });
-    d.messages = nextMessages;
-  });
-  return { ok: true };
+
+    return ok(
+      normalized,
+    );
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-export function toggleChannelMedia(channelId, actorId) {
-  const channel = db.channels[channelId];
-  if (!channel) return { ok: false, error: 'Channel not found.' };
-  const perm = requirePermission(channel, actorId, 'manageChannel', "You don't have permission to manage this channel.");
-  if (!perm.ok) return perm;
-  mutate((d) => {
-    d.channels[channelId] = { ...d.channels[channelId], mediaAllowed: !d.channels[channelId].mediaAllowed };
-  });
-  return { ok: true };
+export async function deleteTopic(
+  channelId,
+  topicId,
+) {
+  try {
+    await api(
+      `/api/v1/topics/${topicId}`,
+      {
+        method:
+          'DELETE',
+      },
+    );
+
+    updateState((s) => {
+      const channel =
+        s.channels[
+          channelId
+        ];
+
+      if (!channel) {
+        return s;
+      }
+
+      const topics = {
+        ...channel.topics,
+      };
+
+      const messages = {
+        ...s.messages,
+      };
+
+      delete topics[
+        topicId
+      ];
+
+      for (
+        const [
+          id,
+          message,
+        ]
+        of Object.entries(
+          messages,
+        )
+      ) {
+        if (
+          message.scopeId ===
+            channelId &&
+          message.topicId ===
+            topicId
+        ) {
+          delete messages[id];
+        }
+      }
+
+      return {
+        ...s,
+
+        channels: {
+          ...s.channels,
+
+          [channelId]: {
+            ...channel,
+            topics,
+          },
+        },
+
+        messages,
+      };
+    });
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
+// =============================================================================
+// DIRECT MESSAGES
+// =============================================================================
 
-function getConversationRecipients(scope, scopeId, senderId) {
-  if (scope === 'dm') {
-    const dm = db.dms[scopeId];
-    return dm ? dm.memberIds.filter((id) => id !== senderId) : [];
+export async function startDm(
+  targetUsername,
+) {
+  try {
+    const channel =
+      await api(
+        '/api/v1/dm/start',
+        {
+          method:
+            'POST',
+
+          body: {
+            targetUsername,
+          },
+        },
+      );
+
+    ensureUserReference(
+      targetUsername,
+    );
+
+    await loadUserProfile(
+      targetUsername,
+    );
+
+    /*
+     * Backend returns a Channel.
+     * We keep target username alongside it because
+     * Direct Channel itself doesn't contain participants.
+     */
+    const dm = {
+      id:
+        channel.id,
+
+      name:
+        channel.name,
+
+      type:
+        channel.type,
+
+      memberIds: [
+        state.currentUserId,
+        targetUsername,
+      ],
+
+      createdAt:
+        null,
+    };
+
+    updateState((s) => ({
+      ...s,
+
+      dms: {
+        ...s.dms,
+
+        [dm.id]:
+          dm,
+      },
+    }));
+
+    return ok(dm);
+  } catch (error) {
+    return fail(error);
   }
-  if (scope === 'group') {
-    const group = db.groups[scopeId];
-    return group ? group.memberIds.filter((id) => id !== senderId) : [];
+}
+
+export async function getOrCreateDm(
+  userA,
+  userB,
+) {
+  const target =
+    userB ===
+    state.currentUserId
+      ? userA
+      : userB;
+
+  return startDm(
+    target,
+  );
+}
+
+export function listDmsForUser(
+  userId,
+) {
+  return Object.values(
+    state.dms,
+  ).filter(
+    (dm) =>
+      dm.memberIds.includes(
+        userId,
+      ),
+  );
+}
+
+export function getDm(id) {
+  return (
+    state.dms[id] ||
+    null
+  );
+}
+
+// =============================================================================
+// MESSAGES
+// =============================================================================
+
+export async function loadMessages(
+  scope,
+  scopeId,
+) {
+  /*
+   * Backend has no:
+   *
+   * /messages/server/{serverId}
+   *
+   * Messages are stored in channels.
+   */
+  if (
+    scope === 'group'
+  ) {
+    return fail(
+      'The backend has no direct server/group message endpoint.',
+    );
   }
-  if (scope === 'channel') {
-    const channel = db.channels[scopeId];
-    return channel ? channel.memberIds.filter((id) => id !== senderId) : [];
+
+  try {
+    const messages =
+      await api(
+        `/api/v1/messages/channel/${scopeId}`,
+      );
+
+    const normalized =
+      (
+        messages || []
+      ).map(
+        (message) =>
+          normalizeMessage(
+            message,
+            scope,
+            scopeId,
+          ),
+      );
+
+    storeMessages(
+      normalized,
+      scope,
+      scopeId,
+      true,
+    );
+
+    return ok(
+      normalized,
+    );
+  } catch (error) {
+    return fail(error);
   }
+}
+
+export function listMessages(
+  scope,
+  scopeId,
+  topicId,
+) {
+  return Object.values(
+    state.messages,
+  )
+    .filter(
+      (message) => {
+        if (
+          message.scope !==
+            scope ||
+          message.scopeId !==
+            scopeId
+        ) {
+          return false;
+        }
+
+        if (
+          scope ===
+            'channel' &&
+          topicId != null &&
+          message.topicId !==
+            topicId
+        ) {
+          return false;
+        }
+
+        return true;
+      },
+    )
+    .sort(
+      (a, b) =>
+        a.createdAt -
+        b.createdAt,
+    );
+}
+
+export async function searchConversationMessages(
+  scope,
+  scopeId,
+  topicId,
+  query,
+) {
+  if (
+    scope === 'group'
+  ) {
+    return fail(
+      'The backend has no direct server/group message endpoint.',
+    );
+  }
+
+  try {
+    const result =
+      await api(
+        `/api/v1/messages/channel/${scopeId}/search?keyword=${encodeURIComponent(
+          query,
+        )}&limit=20`,
+      );
+
+    const messages =
+      (
+        result?.messages || []
+      ).map(
+        (message) =>
+          normalizeMessage(
+            message,
+            scope,
+            scopeId,
+          ),
+      );
+
+    return ok(
+      messages.filter(
+        (message) =>
+          topicId == null ||
+          message.topicId ===
+          topicId,
+      ),
+    );
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function sendMessage(
+  payload,
+) {
+  /*
+   * Backend does not support posting directly to a Server.
+   */
+  if (
+    payload.scope ===
+    'group'
+  ) {
+    return fail(
+      'The backend sends messages to channels, not directly to a server/group.',
+    );
+  }
+
+  try {
+    /*
+     * If the frontend selected a file,
+     * upload it first.
+     */
+    const attachmentFileName =
+      await uploadAttachment(
+        payload,
+      );
+
+    const message =
+      await api(
+        '/api/v1/messages',
+        {
+          method:
+            'POST',
+
+          body: {
+            content:
+              payload.text ||
+              '',
+
+            channelId:
+              Number(
+                payload.scopeId,
+              ),
+
+            attachmentFileName,
+
+            topicId:
+              payload.topicId !=
+              null
+                ? Number(
+                    payload.topicId,
+                  )
+                : null,
+          },
+        },
+      );
+
+    const normalized =
+      normalizeMessage(
+        message,
+        payload.scope,
+        payload.scopeId,
+      );
+
+    storeMessages(
+      [normalized],
+      payload.scope,
+      payload.scopeId,
+    );
+
+    return ok(
+      normalized,
+    );
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+/*
+ * Old frontend called this function.
+ * There is no frontend fake queue anymore.
+ */
+export async function sendOrQueueMessage(
+  payload,
+) {
+  return sendMessage(
+    payload,
+  );
+}
+
+export async function editMessage(
+  messageId,
+  actorId,
+  {
+    text,
+  },
+) {
+  try {
+    const previous =
+      state.messages[
+        messageId
+      ];
+
+    const message =
+      await api(
+        `/api/v1/messages/${messageId}`,
+        {
+          method:
+            'PUT',
+
+          body: {
+            content:
+              text,
+          },
+        },
+      );
+
+    const normalized =
+      normalizeMessage(
+        message,
+
+        previous?.scope ||
+        'channel',
+
+        previous?.scopeId,
+      );
+
+    storeMessages(
+      [normalized],
+      normalized.scope,
+      normalized.scopeId,
+    );
+
+    return ok(
+      normalized,
+    );
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function deleteMessage(
+  messageId,
+) {
+  try {
+    await api(
+      `/api/v1/messages/${messageId}`,
+      {
+        method:
+          'DELETE',
+      },
+    );
+
+    updateState((s) => {
+      const messages = {
+        ...s.messages,
+      };
+
+      delete messages[
+        messageId
+      ];
+
+      return {
+        ...s,
+        messages,
+      };
+    });
+
+    return ok();
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export function canManageMessagesIn(
+  scope,
+  scopeId,
+  actorId,
+) {
+  if (
+    scope !==
+    'channel'
+  ) {
+    return false;
+  }
+
+  return channelHasPermission(
+    state.channels[
+      scopeId
+    ],
+    actorId,
+    'deleteAnyMessage',
+  );
+}
+
+// =============================================================================
+// FEATURES NOT EXPOSED BY CURRENT BACKEND API
+// =============================================================================
+//
+// These intentionally do NOT simulate backend behavior.
+//
+// They exist only so old UI references do not immediately crash while you
+// remove/disable those UI features.
+// =============================================================================
+
+function unsupported(feature) {
+  return Promise.resolve(
+    fail(
+      `${feature} is not exposed by the current backend API.`,
+    ),
+  );
+}
+
+// No fake offline mode.
+export function isOffline() {
+  return (
+    typeof navigator !==
+      'undefined' &&
+    navigator.onLine ===
+      false
+  );
+}
+
+export function setSimulateOffline() {
+  return unsupported(
+    'Simulated offline mode',
+  );
+}
+
+// No client-side outbox.
+export function listOutboxForConversation() {
   return [];
 }
 
-function validateMessagePayload({ kind, text, fileSize }) {
-  if (kind === 'text') {
-    if (!text || !text.trim()) return { ok: false, error: 'Message text cannot be empty.' };
-  } else if (fileSize && fileSize > MAX_FILE_BYTES) {
-    return { ok: false, error: 'File is larger than the 4MB demo limit.' };
-  }
-  return { ok: true };
+export function retryOutboxItem() {
+  return unsupported(
+    'Outbox retry',
+  );
 }
 
-function checkSendPermission({ scope, scopeId, topicId, senderId, kind }) {
-  if (scope === 'dm') {
-    const dm = db.dms[scopeId];
-    if (!dm || !dm.memberIds.includes(senderId)) {
-      return { ok: false, error: "You don't have access to this conversation." };
-    }
-  } else if (scope === 'group') {
-    const group = db.groups[scopeId];
-    if (!group || !group.memberIds.includes(senderId)) {
-      return { ok: false, error: 'You are not a member of this group.' };
-    }
-  } else if (scope === 'channel') {
-    const channel = db.channels[scopeId];
-    if (!channel || !channel.memberIds.includes(senderId)) {
-      return { ok: false, error: 'You are not a member of this channel.' };
-    }
-    if (!channelHasPermission(channel, senderId, 'post')) {
-      return { ok: false, error: "Your role doesn't allow posting in this channel." };
-    }
-    if (!channel.topics[topicId]) {
-      return { ok: false, error: 'Select a topic first.' };
-    }
-    if (kind !== 'text' && channel.mediaAllowed === false && senderId !== channel.ownerId) {
-      return { ok: false, error: 'Media sharing is disabled in this channel by the admin.' };
-    }
-  } else {
-    return { ok: false, error: 'Invalid message destination.' };
-  }
-  return { ok: true };
+export function removeOutboxItem() {
+  return unsupported(
+    'Outbox removal',
+  );
 }
 
-function createNotificationsFor(scope, scopeId, topicId, senderId, message) {
-  const recipients = getConversationRecipients(scope, scopeId, senderId);
-  const preview =
-    message.kind === 'text'
-      ? message.text.slice(0, NOTIFICATION_PREVIEW_LEN)
-      : `Sent ${message.kind === 'file' ? 'a file' : `a ${message.kind}`}${message.text ? `: ${message.text.slice(0, 50)}` : ''}`;
-  recipients.forEach((userId) => {
-    const notif = {
-      id: makeId('n'),
-      userId,
-      fromUserId: senderId,
-      scope,
-      scopeId,
-      topicId,
-      preview,
-      createdAt: message.createdAt,
-      read: false,
-    };
-    db.notifications[notif.id] = notif;
-  });
+export function flushOutbox() {}
+
+// No notification REST controller.
+export function listNotifications() {
+  return [];
 }
 
-function buildMessageRecord({ scope, scopeId, topicId, senderId, kind, text, fileName, fileSize, dataUrl, createdAt }) {
-  return {
-    id: makeId('m'),
-    scope,
-    scopeId,
-    topicId: scope === 'channel' ? topicId : undefined,
-    senderId,
-    kind,
-    text: text ? text.trim() : '',
-    fileName: fileName || undefined,
-    fileSize: fileSize || undefined,
-    dataUrl: dataUrl || undefined,
-    createdAt: createdAt || Date.now(),
-  };
+export function unreadNotificationCount() {
+  return 0;
 }
 
-export function listMessages(scope, scopeId, topicId) {
-  return Object.values(db.messages)
-    .filter((m) => {
-      if (m.scope !== scope || m.scopeId !== scopeId) return false;
-      if (scope === 'channel' && m.topicId !== topicId) return false;
-      return true;
-    })
-    .sort((a, b) => a.createdAt - b.createdAt);
+export function markNotificationRead() {
+  return unsupported(
+    'Notifications',
+  );
 }
 
-export function searchConversationMessages(scope, scopeId, topicId, query) {
-  const q = (query || '').trim().toLowerCase();
-  const all = listMessages(scope, scopeId, topicId);
-  if (!q) return all;
-  return all.filter((m) => {
-    const inText = m.text && m.text.toLowerCase().includes(q);
-    const inFile = m.fileName && m.fileName.toLowerCase().includes(q);
-    return inText || inFile;
-  });
+export function markAllNotificationsRead() {
+  return unsupported(
+    'Notifications',
+  );
 }
 
-export function sendMessage(payload) {
-  const { scope, scopeId, topicId, senderId } = payload;
-  const validation = validateMessagePayload(payload);
-  if (!validation.ok) return validation;
-  const permission = checkSendPermission(payload);
-  if (!permission.ok) return permission;
+// No scheduled-message REST routes.
+export function processDueScheduledMessages() {}
 
-  const message = buildMessageRecord(payload);
-  mutate((d) => {
-    d.messages = { ...d.messages, [message.id]: message };
-    createNotificationsFor(scope, scopeId, topicId, senderId, message);
-  });
-  return { ok: true, data: message };
+export function scheduleMessage() {
+  return unsupported(
+    'Scheduled messages',
+  );
 }
 
-export function editMessage(messageId, actorId, { text }) {
-  const message = db.messages[messageId];
-  if (!message) return { ok: false, error: 'Message not found.' };
-  if (message.senderId !== actorId) {
-    return { ok: false, error: 'You can only edit your own messages.' };
-  }
-  if (message.kind === 'text' && (!text || !text.trim())) {
-    return { ok: false, error: 'Message cannot be empty.' };
-  }
-  mutate((d) => {
-    d.messages[messageId] = {
-      ...d.messages[messageId],
-      text: text !== undefined ? text.trim() : d.messages[messageId].text,
-      editedAt: Date.now(),
-    };
-  });
-  return { ok: true };
+export function editScheduledMessage() {
+  return unsupported(
+    'Scheduled messages',
+  );
 }
 
-function canDeleteAnyMessageIn(scope, scopeId, actorId) {
-  if (scope === 'group') {
-    const group = db.groups[scopeId];
-    return group && group.ownerId === actorId;
-  }
-  if (scope === 'channel') {
-    const channel = db.channels[scopeId];
-    return channel && channelHasPermission(channel, actorId, 'deleteAnyMessage');
-  }
-  return false;
+export function cancelScheduledMessage() {
+  return unsupported(
+    'Scheduled messages',
+  );
 }
 
-export function deleteMessage(messageId, actorId) {
-  const message = db.messages[messageId];
-  if (!message) return { ok: false, error: 'Message not found.' };
-  const isOwn = message.senderId === actorId;
-  const isManager = canDeleteAnyMessageIn(message.scope, message.scopeId, actorId);
-  if (!isOwn && !isManager) {
-    return { ok: false, error: "You don't have permission to delete this message." };
-  }
-  mutate((d) => {
-    const { [messageId]: _removed, ...rest } = d.messages;
-    d.messages = rest;
-  });
-  return { ok: true };
+export function listScheduledForUser() {
+  return [];
 }
 
-export function canManageMessagesIn(scope, scopeId, actorId) {
-  return canDeleteAnyMessageIn(scope, scopeId, actorId);
+// Backend supports assigning an existing role,
+// but not creating/editing/deleting role definitions.
+export function createChannelRole() {
+  return unsupported(
+    'Role creation',
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Notifications
-// ---------------------------------------------------------------------------
-
-export function listNotifications(userId) {
-  return Object.values(db.notifications)
-    .filter((n) => n.userId === userId)
-    .sort((a, b) => b.createdAt - a.createdAt);
+export function updateChannelRole() {
+  return unsupported(
+    'Role editing',
+  );
 }
 
-export function unreadNotificationCount(userId) {
-  return Object.values(db.notifications).filter((n) => n.userId === userId && !n.read).length;
+export function deleteChannelRole() {
+  return unsupported(
+    'Role deletion',
+  );
 }
-
-export function markNotificationRead(id) {
-  mutate((d) => {
-    if (d.notifications[id]) d.notifications[id] = { ...d.notifications[id], read: true };
-  });
-  return { ok: true };
-}
-
-export function markAllNotificationsRead(userId) {
-  mutate((d) => {
-    const next = { ...d.notifications };
-    Object.values(next).forEach((n) => {
-      if (n.userId === userId && !n.read) next[n.id] = { ...n, read: true };
-    });
-    d.notifications = next;
-  });
-  return { ok: true };
-}
-
-// ---------------------------------------------------------------------------
-// Scheduled messages (award #2)
-// ---------------------------------------------------------------------------
-
-export function scheduleMessage(payload) {
-  const { authorId, scope, scopeId, topicId, sendAt } = payload;
-  const validation = validateMessagePayload(payload);
-  if (!validation.ok) return validation;
-  if (!sendAt || sendAt <= Date.now()) {
-    return { ok: false, error: 'Pick a date and time in the future.' };
-  }
-  const permission = checkSendPermission({ ...payload, senderId: authorId });
-  if (!permission.ok) return permission;
-
-  const entry = {
-    id: makeId('sched'),
-    authorId,
-    scope,
-    scopeId,
-    topicId: scope === 'channel' ? topicId : undefined,
-    kind: payload.kind,
-    text: payload.text ? payload.text.trim() : '',
-    fileName: payload.fileName || undefined,
-    fileSize: payload.fileSize || undefined,
-    dataUrl: payload.dataUrl || undefined,
-    sendAt,
-    status: 'pending',
-    createdAt: Date.now(),
-  };
-  mutate((d) => {
-    d.scheduledMessages = { ...d.scheduledMessages, [entry.id]: entry };
-  });
-  return { ok: true, data: entry };
-}
-
-export function editScheduledMessage(id, actorId, patch) {
-  const entry = db.scheduledMessages[id];
-  if (!entry) return { ok: false, error: 'Scheduled message not found.' };
-  if (entry.authorId !== actorId) return { ok: false, error: 'You can only edit your own scheduled messages.' };
-  if (entry.status !== 'pending') return { ok: false, error: 'This message can no longer be edited.' };
-  if (patch.sendAt !== undefined && patch.sendAt <= Date.now()) {
-    return { ok: false, error: 'Pick a date and time in the future.' };
-  }
-  if (patch.text !== undefined && entry.kind === 'text' && !patch.text.trim()) {
-    return { ok: false, error: 'Message text cannot be empty.' };
-  }
-  mutate((d) => {
-    d.scheduledMessages[id] = {
-      ...d.scheduledMessages[id],
-      text: patch.text !== undefined ? patch.text.trim() : d.scheduledMessages[id].text,
-      sendAt: patch.sendAt !== undefined ? patch.sendAt : d.scheduledMessages[id].sendAt,
-    };
-  });
-  return { ok: true };
-}
-
-export function cancelScheduledMessage(id, actorId) {
-  const entry = db.scheduledMessages[id];
-  if (!entry) return { ok: false, error: 'Scheduled message not found.' };
-  if (entry.authorId !== actorId) return { ok: false, error: 'You can only cancel your own scheduled messages.' };
-  if (entry.status !== 'pending') return { ok: false, error: 'This message can no longer be canceled.' };
-  mutate((d) => {
-    d.scheduledMessages[id] = { ...d.scheduledMessages[id], status: 'canceled' };
-  });
-  return { ok: true };
-}
-
-export function listScheduledForUser(authorId) {
-  return Object.values(db.scheduledMessages)
-    .filter((s) => s.authorId === authorId)
-    .sort((a, b) => a.sendAt - b.sendAt);
-}
-
-// Call periodically (e.g. from a UI timer) to actually deliver any due
-// scheduled messages. A real backend would do this with a queue/cron job.
-export function processDueScheduledMessages() {
-  const now = Date.now();
-  const due = Object.values(db.scheduledMessages).filter((s) => s.status === 'pending' && s.sendAt <= now);
-  if (due.length === 0) return;
-
-  mutate((d) => {
-    due.forEach((entry) => {
-      const permission = checkSendPermission({ ...entry, senderId: entry.authorId });
-      const validation = validateMessagePayload(entry);
-      if (!permission.ok || !validation.ok) {
-        d.scheduledMessages[entry.id] = {
-          ...d.scheduledMessages[entry.id],
-          status: 'failed',
-          error: !validation.ok ? validation.error : permission.error,
-        };
-        return;
-      }
-      const message = buildMessageRecord({ ...entry, senderId: entry.authorId, createdAt: Date.now() });
-      d.messages = { ...d.messages, [message.id]: message };
-      createNotificationsFor(entry.scope, entry.scopeId, entry.topicId, entry.authorId, message);
-      d.scheduledMessages[entry.id] = { ...d.scheduledMessages[entry.id], status: 'sent', sentAt: message.createdAt };
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Offline outbox (award #1, item 3) — messages composed while offline are
-// queued locally and flushed automatically once back online.
-// ---------------------------------------------------------------------------
-
-export function sendOrQueueMessage(payload) {
-  if (!isOffline()) {
-    return sendMessage(payload);
-  }
-  const entry = {
-    id: makeId('out'),
-    payload,
-    status: 'queued',
-    createdAt: Date.now(),
-  };
-  mutate((d) => {
-    d.outbox = { ...d.outbox, [entry.id]: entry };
-  });
-  return { ok: true, queued: true, data: entry };
-}
-
-export function listOutboxForConversation(scope, scopeId, topicId) {
-  return Object.values(db.outbox)
-    .filter((o) => o.payload.scope === scope && o.payload.scopeId === scopeId && o.payload.topicId === topicId)
-    .sort((a, b) => a.createdAt - b.createdAt);
-}
-
-export function retryOutboxItem(id) {
-  const entry = db.outbox[id];
-  if (!entry) return { ok: false, error: 'Queued message not found.' };
-  const result = sendMessage(entry.payload);
-  mutate((d) => {
-    if (result.ok) {
-      const { [id]: _removed, ...rest } = d.outbox;
-      d.outbox = rest;
-    } else {
-      d.outbox[id] = { ...d.outbox[id], status: 'failed', error: result.error };
-    }
-  });
-  return result;
-}
-
-export function removeOutboxItem(id) {
-  mutate((d) => {
-    const { [id]: _removed, ...rest } = d.outbox;
-    d.outbox = rest;
-  });
-  return { ok: true };
-}
-
-export function flushOutbox() {
-  if (isOffline()) return;
-  const queued = Object.values(db.outbox)
-    .filter((o) => o.status === 'queued')
-    .sort((a, b) => a.createdAt - b.createdAt);
-  queued.forEach((entry) => retryOutboxItem(entry.id));
-}
-
-export const MAX_FILE_BYTES_EXPORT = MAX_FILE_BYTES;

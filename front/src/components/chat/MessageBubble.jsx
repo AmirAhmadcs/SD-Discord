@@ -1,31 +1,47 @@
-import { useState } from 'react';
-import { Pencil, Trash2, Check, X, Download, FileText } from 'lucide-react';
-import Avatar from '../Avatar';
-import { formatTimeOnly } from '../../utils/time';
-import { formatBytes } from '../../utils/file';
+import { useState } from "react";
+import { Pencil, Trash2, Check, X, Download, FileText } from "lucide-react";
+import Avatar from "../Avatar";
+import { formatTimeOnly } from "../../utils/time";
+import { formatBytes } from "../../utils/file";
 
 function MediaContent({ message }) {
-  if (message.kind === 'image') {
+  if (message.kind === "image") {
     return (
       <img
         src={message.dataUrl}
-        alt={message.fileName || 'image attachment'}
-        style={{ maxWidth: 320, maxHeight: 260, borderRadius: 10, display: 'block', marginTop: 4 }}
+        alt={message.fileName || "image attachment"}
+        style={{
+          maxWidth: 320,
+          maxHeight: 260,
+          borderRadius: 10,
+          display: "block",
+          marginTop: 4,
+        }}
       />
     );
   }
-  if (message.kind === 'video') {
+  if (message.kind === "video") {
     return (
       <video
         src={message.dataUrl}
         controls
-        style={{ maxWidth: 340, maxHeight: 260, borderRadius: 10, display: 'block', marginTop: 4 }}
+        style={{
+          maxWidth: 340,
+          maxHeight: 260,
+          borderRadius: 10,
+          display: "block",
+          marginTop: 4,
+        }}
       />
     );
   }
-  if (message.kind === 'audio') {
+  if (message.kind === "audio") {
     return (
-      <audio src={message.dataUrl} controls style={{ marginTop: 6, maxWidth: 300 }} />
+      <audio
+        src={message.dataUrl}
+        controls
+        style={{ marginTop: 6, maxWidth: 300 }}
+      />
     );
   }
   // file / document
@@ -34,54 +50,74 @@ function MediaContent({ message }) {
       href={message.dataUrl}
       download={message.fileName}
       style={{
-        display: 'flex',
-        alignItems: 'center',
+        display: "flex",
+        alignItems: "center",
         gap: 10,
         marginTop: 6,
-        padding: '10px 12px',
-        background: 'var(--bg-input)',
-        border: '1px solid var(--border-mid)',
+        padding: "10px 12px",
+        background: "var(--bg-input)",
+        border: "1px solid var(--border-mid)",
         borderRadius: 10,
         maxWidth: 300,
-        textDecoration: 'none',
-        color: 'var(--text-primary)',
+        textDecoration: "none",
+        color: "var(--text-primary)",
       }}
     >
       <FileText size={22} color="var(--accent-text)" />
-      <span style={{ overflow: 'hidden' }}>
-        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <span style={{ overflow: "hidden" }}>
+        <span
+          style={{
+            display: "block",
+            fontSize: 13.5,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
           {message.fileName}
         </span>
-        <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{formatBytes(message.fileSize)}</span>
+        <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+          {formatBytes(message.fileSize)}
+        </span>
       </span>
-      <Download size={16} style={{ marginLeft: 'auto', flexShrink: 0 }} />
+      <Download size={16} style={{ marginLeft: "auto", flexShrink: 0 }} />
     </a>
   );
 }
 
-export default function MessageBubble({ message, sender, isOwn, canDelete, showHeader, onEdit, onDelete, onOpenProfile }) {
+export default function MessageBubble({
+  message,
+  sender,
+  isOwn,
+  canDelete,
+  showHeader,
+  onEdit,
+  onDelete,
+  onOpenProfile,
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.text);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
 
-  function submitEdit() {
-    const result = onEdit(message.id, draft);
+  async function submitEdit() {
+    const result = await onEdit(message.id, draft);
     if (!result.ok) {
       setError(result.error);
       return;
     }
     setEditing(false);
-    setError('');
+    setError("");
   }
 
   return (
     <div
       className="message-row"
       style={{
-        display: 'flex',
+        display: "flex",
         gap: 12,
-        padding: showHeader ? '10px 16px 2px' : '1px 16px',
-        position: 'relative',
+        padding: showHeader ? "10px 16px 2px" : "1px 16px",
+        position: "relative",
       }}
     >
       <div style={{ width: 36, flexShrink: 0 }}>
@@ -89,7 +125,12 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
           <button
             onClick={() => onOpenProfile?.(sender.id)}
             aria-label={`View ${sender.name}'s profile`}
-            style={{ background: 'transparent', border: 'none', padding: 0, display: 'flex' }}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              display: "flex",
+            }}
           >
             <Avatar label={sender.name} size={36} />
           </button>
@@ -98,14 +139,30 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
 
       <div style={{ flex: 1, minWidth: 0 }}>
         {showHeader && (
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 2 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 8,
+              marginBottom: 2,
+            }}
+          >
             <button
               onClick={() => sender && onOpenProfile?.(sender.id)}
-              style={{ background: 'transparent', border: 'none', padding: 0, fontWeight: 600, fontSize: 14.5, color: 'inherit' }}
+              style={{
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                fontWeight: 600,
+                fontSize: 14.5,
+                color: "inherit",
+              }}
             >
-              {sender?.name || 'Unknown user'}
+              {sender?.name || "Unknown user"}
             </button>
-            <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{formatTimeOnly(message.createdAt)}</span>
+            <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+              {formatTimeOnly(message.createdAt)}
+            </span>
           </div>
         )}
 
@@ -117,51 +174,79 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
               rows={2}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              style={{ resize: 'vertical' }}
+              style={{ resize: "vertical" }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submitEdit();
                 }
-                if (e.key === 'Escape') setEditing(false);
+                if (e.key === "Escape") setEditing(false);
               }}
             />
             {error && <div className="field-error">{error}</div>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <button className="btn btn-primary" style={{ padding: '5px 12px', fontSize: 13 }} onClick={submitEdit}>
-                <Check size={13} style={{ verticalAlign: '-2px', marginRight: 4 }} />
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <button
+                className="btn btn-primary"
+                style={{ padding: "5px 12px", fontSize: 13 }}
+                onClick={submitEdit}
+              >
+                <Check
+                  size={13}
+                  style={{ verticalAlign: "-2px", marginRight: 4 }}
+                />
                 Save
               </button>
               <button
                 className="btn btn-ghost"
-                style={{ padding: '5px 12px', fontSize: 13 }}
+                style={{ padding: "5px 12px", fontSize: 13 }}
                 onClick={() => {
                   setEditing(false);
                   setDraft(message.text);
-                  setError('');
+                  setError("");
                 }}
               >
-                <X size={13} style={{ verticalAlign: '-2px', marginRight: 4 }} />
+                <X
+                  size={13}
+                  style={{ verticalAlign: "-2px", marginRight: 4 }}
+                />
                 Cancel
               </button>
             </div>
           </div>
         ) : (
           <>
-            {message.kind === 'text' ? (
-              <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {message.kind === "text" ? (
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 14.5,
+                  lineHeight: 1.55,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
                 {message.text}
               </p>
             ) : (
               <>
                 <MediaContent message={message} />
                 {message.text && (
-                  <p style={{ margin: '4px 0 0', fontSize: 13.5, color: 'var(--text-secondary)' }}>{message.text}</p>
+                  <p
+                    style={{
+                      margin: "4px 0 0",
+                      fontSize: 13.5,
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {message.text}
+                  </p>
                 )}
               </>
             )}
             {message.editedAt && (
-              <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>(edited)</span>
+              <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
+                (edited)
+              </span>
             )}
           </>
         )}
@@ -171,14 +256,14 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
         <div
           className="msg-actions"
           style={{
-            position: 'absolute',
+            position: "absolute",
             top: 6,
             right: 16,
-            display: 'flex',
+            display: "flex",
             gap: 4,
-            transition: 'opacity 0.1s ease',
-            background: 'var(--bg-panel-2)',
-            border: '1px solid var(--border-soft)',
+            transition: "opacity 0.1s ease",
+            background: "var(--bg-panel-2)",
+            border: "1px solid var(--border-soft)",
             borderRadius: 8,
             padding: 3,
           }}
@@ -188,7 +273,12 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
               aria-label="Edit message"
               title="Edit message"
               onClick={() => setEditing(true)}
-              style={{ background: 'transparent', border: 'none', padding: 5, color: 'var(--text-secondary)' }}
+              style={{
+                background: "transparent",
+                border: "none",
+                padding: 5,
+                color: "var(--text-secondary)",
+              }}
             >
               <Pencil size={14} />
             </button>
@@ -197,7 +287,12 @@ export default function MessageBubble({ message, sender, isOwn, canDelete, showH
             aria-label="Delete message"
             title="Delete message"
             onClick={() => onDelete(message.id)}
-            style={{ background: 'transparent', border: 'none', padding: 5, color: '#ff8484' }}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 5,
+              color: "#ff8484",
+            }}
           >
             <Trash2 size={14} />
           </button>

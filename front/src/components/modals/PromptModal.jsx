@@ -1,15 +1,22 @@
-import { useState } from 'react';
-import Modal from '../Modal';
+import { useState } from "react";
+import Modal from "../Modal";
 
-export default function PromptModal({ title, label, initialValue = '', confirmLabel = 'Save', onClose, onSubmit }) {
+export default function PromptModal({
+  title,
+  label,
+  initialValue = "",
+  confirmLabel = "Save",
+  onClose,
+  onSubmit,
+}) {
   const [value, setValue] = useState(initialValue);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
 
-  function submit(e) {
+  async function submit(e) {
     e?.preventDefault();
-    const result = onSubmit(value);
+    const result = await onSubmit(value);
     if (!result?.ok) {
-      setError(result?.error || 'Something went wrong.');
+      setError(result?.error || "Something went wrong.");
       return;
     }
     onClose();
@@ -37,11 +44,11 @@ export default function PromptModal({ title, label, initialValue = '', confirmLa
         <input
           id="prompt-input"
           autoFocus
-          className={`field-input ${error ? 'has-error' : ''}`}
+          className={`field-input ${error ? "has-error" : ""}`}
           value={value}
           onChange={(e) => {
             setValue(e.target.value);
-            setError('');
+            setError("");
           }}
         />
         {error && <div className="field-error">{error}</div>}

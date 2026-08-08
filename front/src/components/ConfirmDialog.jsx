@@ -1,6 +1,6 @@
 import Modal from './Modal';
 
-export default function ConfirmDialog({ title, message, confirmLabel = 'حذف', onConfirm, onClose, danger = true }) {
+export default async function ConfirmDialog({ title, message, confirmLabel = 'حذف', onConfirm, onClose, danger = true }) {
   return (
     <Modal
       title={title}
@@ -14,7 +14,7 @@ export default function ConfirmDialog({ title, message, confirmLabel = 'حذف',
           <button
             className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
             onClick={() => {
-              onConfirm();
+              await onConfirm();
               onClose();
             }}
           >
