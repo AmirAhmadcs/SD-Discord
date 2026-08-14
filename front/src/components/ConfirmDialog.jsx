@@ -1,6 +1,13 @@
-import Modal from './Modal';
+import Modal from "./Modal";
 
-export default async function ConfirmDialog({ title, message, confirmLabel = 'حذف', onConfirm, onClose, danger = true }) {
+export default async function ConfirmDialog({
+  title,
+  message,
+  confirmLabel = "حذف",
+  onConfirm,
+  onClose,
+  danger = true,
+}) {
   return (
     <Modal
       title={title}
@@ -12,9 +19,9 @@ export default async function ConfirmDialog({ title, message, confirmLabel = 'ح
             انصراف
           </button>
           <button
-            className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
+            className={`btn ${danger ? "btn-danger" : "btn-primary"}`}
             onClick={() => {
-              await onConfirm();
+              onConfirm();
               onClose();
             }}
           >
@@ -23,7 +30,16 @@ export default async function ConfirmDialog({ title, message, confirmLabel = 'ح
         </>
       }
     >
-      <p style={{ color: 'var(--text-secondary)', margin: 0, lineHeight: 1.8, fontSize: 14.5 }}>{message}</p>
+      <p
+        style={{
+          color: "var(--text-secondary)",
+          margin: 0,
+          lineHeight: 1.8,
+          fontSize: 14.5,
+        }}
+      >
+        {message}
+      </p>
     </Modal>
   );
 }
