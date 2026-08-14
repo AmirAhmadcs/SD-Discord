@@ -28,7 +28,7 @@ services:
       - discord-network
 
   keycloak:
-    image: quay.io/keycloak/keycloak:24.0.4
+    image: keycloak/keycloak:24.0.4
     container_name: keycloak-server
     command: start-dev
     environment:
@@ -76,8 +76,8 @@ services:
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: password
     ports:
-      - "9000:9000"   # API
-      - "9001:9001"   # پنل کاربری
+      - "9000:9000" # API
+      - "9001:9001" # پنل کاربری
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
