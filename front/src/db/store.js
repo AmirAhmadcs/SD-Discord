@@ -22,9 +22,33 @@ let state = {
   // Kept only because some existing UI code reads it.
   // We are NOT implementing fake offline mode anymore.
   simulateOffline: false,
+
+  // Mirrors the live STOMP connection state so the UI can
+  // surface "connecting…" while the realtime socket is down.
+  realtimeConnected: false,
 };
 
 const listeners = new Set();
+
+// Per-conversation generation counter and in-flight load dedupe.
+// A message merge (send / live push) bumps the generation so a pending
+// loadMessages can detect that the store gained newer data while the
+// fetch was in flight and avoid wiping it with a stale replace.
+const scopeGenerations = new Map();
+const messageLoads = new Map();
+const userProfileLoads = new Map();
+
+function scopeKey(scope, scopeId) {
+  return `${scope}:${scopeId}`;
+}
+
+function bumpScopeGeneration(scope, scopeId) {
+  const key = scopeKey(scope, scopeId);
+  scopeGenerations.set(
+    key,
+    (scopeGenerations.get(key) || 0) + 1,
+  );
+}
 
 // -----------------------------------------------------------------------------
 // React store helpers
@@ -113,6 +137,30 @@ function getErrorMessage(
   response,
 ) {
   if (
+    data &&
+    typeof data === 'object' &&
+    data.errors &&
+    typeof data.errors === 'object'
+  ) {
+    const details =
+      Object.entries(
+        data.errors,
+      )
+        .map(
+          ([
+            field,
+            message,
+          ]) =>
+            `${field}: ${message}`,
+        )
+        .join(', ');
+
+    if (details) {
+      return details;
+    }
+  }
+
+  if (
     typeof data === 'string' &&
     data.trim()
   ) {
@@ -130,7 +178,9 @@ function getErrorMessage(
   return `${response.status} ${response.statusText}`;
 }
 
-async function refreshAccessToken() {
+let refreshPromise = null;
+
+async function refreshAccessTokenRaw() {
   const refreshToken =
     getRefreshToken();
 
@@ -167,6 +217,22 @@ async function refreshAccessToken() {
   saveTokens(tokens);
 
   return true;
+}
+
+/*
+ * Single-flight: every concurrent 401 that lands on this
+ * function shares one refresh request. Refreshing the token
+ * twice in parallel can rotate the refresh token out from
+ * under one of the requests and clear the session.
+ */
+function refreshAccessToken() {
+  if (!refreshPromise) {
+    refreshPromise = refreshAccessTokenRaw().finally(() => {
+      refreshPromise = null;
+    });
+  }
+
+  return refreshPromise;
 }
 
 async function api(
@@ -430,36 +496,59 @@ function ensureUserReference(
   }));
 }
 
-async function loadUserProfile(
+function loadUserProfile(
   username,
 ) {
   if (!username) {
     return null;
   }
 
-  try {
-    const profile =
-      await api(
-        `/api/v1/users/${encodeURIComponent(
-          username,
-        )}`,
-      );
-
-    return cacheUser(
-      profile,
-    );
-  } catch {
-    // Username still came from backend server/member response.
-    ensureUserReference(
+  if (
+    userProfileLoads.has(
+      username,
+    )
+  ) {
+    return userProfileLoads.get(
       username,
     );
-
-    return (
-      state.users[
-        username
-      ] || null
-    );
   }
+
+  const promise = (async () => {
+    try {
+      const profile =
+        await api(
+          `/api/v1/users/${encodeURIComponent(
+            username,
+          )}`,
+        );
+
+      return cacheUser(
+        profile,
+      );
+    } catch {
+      // Username still came from backend server/member response.
+      ensureUserReference(
+        username,
+      );
+
+      return (
+        state.users[
+          username
+        ] || null
+      );
+    } finally {
+      userProfileLoads.delete(
+        username,
+      );
+    }
+  })();
+
+  userProfileLoads.set(
+    username,
+    promise,
+  );
+
+  return promise;
 }
 
 // -----------------------------------------------------------------------------
@@ -924,6 +1013,7 @@ function normalizeMessage(
     scopeId,
 
     topicId:
+      message.topicId ??
       message.topic?.id ??
       null,
 
@@ -1018,6 +1108,11 @@ function storeMessages(
         nextMessages,
     };
   });
+
+  bumpScopeGeneration(
+    scope,
+    scopeId,
+  );
 
   for (
     const message
@@ -1138,73 +1233,85 @@ async function uploadAttachment(
 // INITIALIZATION
 // =============================================================================
 
-export async function bootstrap() {
+let bootstrapPromise = null;
+
+export function bootstrap() {
   if (state.initialized) {
     return ok();
   }
 
-  if (
-    !getAccessToken() &&
-    !getRefreshToken()
-  ) {
-    updateState((s) => ({
-      ...s,
-      initialized: true,
-    }));
-
-    return ok();
+  if (bootstrapPromise) {
+    return bootstrapPromise;
   }
 
-  try {
-    const profile =
-      await api(
-        '/api/v1/users/me',
-      );
+  bootstrapPromise = (async () => {
+    if (
+      !getAccessToken() &&
+      !getRefreshToken()
+    ) {
+      updateState((s) => ({
+        ...s,
+        initialized: true,
+      }));
 
-    const user =
-      userFromApi(
-        profile,
-      );
+      return ok();
+    }
 
-    updateState((s) => ({
-      ...s,
+    try {
+      const profile =
+        await api(
+          '/api/v1/users/me',
+        );
 
-      initialized: true,
+      const user =
+        userFromApi(
+          profile,
+        );
 
-      currentUserId:
-        user.id,
+      updateState((s) => ({
+        ...s,
 
-      users: {
-        ...s.users,
+        initialized: true,
 
-        [user.id]:
-          user,
-      },
-    }));
+        currentUserId:
+          user.id,
 
-    await loadServers();
+        users: {
+          ...s.users,
 
-    return ok(user);
-  } catch (error) {
-    clearTokens();
+          [user.id]:
+            user,
+        },
+      }));
 
-    updateState((s) => ({
-      ...s,
+      await loadServers();
 
-      initialized: true,
+      return ok(user);
+    } catch (error) {
+      clearTokens();
 
-      currentUserId:
-        null,
+      updateState((s) => ({
+        ...s,
 
-      users: {},
-      dms: {},
-      groups: {},
-      channels: {},
-      messages: {},
-    }));
+        initialized: true,
 
-    return fail(error);
-  }
+        currentUserId:
+          null,
+
+        users: {},
+        dms: {},
+        groups: {},
+        channels: {},
+        messages: {},
+      }));
+
+      return fail(error);
+    } finally {
+      bootstrapPromise = null;
+    }
+  })();
+
+  return bootstrapPromise;
 }
 
 // =============================================================================
@@ -1300,6 +1407,8 @@ export async function login({
         user.id,
 
       users: {
+        ...s.users,
+
         [user.id]:
           user,
       },
@@ -2508,7 +2617,7 @@ export function getDm(id) {
 // MESSAGES
 // =============================================================================
 
-export async function loadMessages(
+export function loadMessages(
   scope,
   scopeId,
 ) {
@@ -2522,42 +2631,93 @@ export async function loadMessages(
   if (
     scope === 'group'
   ) {
-    return fail(
-      'The backend has no direct server/group message endpoint.',
+    return Promise.resolve(
+      fail(
+        'The backend has no direct server/group message endpoint.',
+      ),
     );
   }
 
-  try {
-    const messages =
-      await api(
-        `/api/v1/messages/channel/${scopeId}`,
-      );
+  const key =
+    scopeKey(scope, scopeId);
 
-    const normalized =
-      (
-        messages || []
-      ).map(
-        (message) =>
-          normalizeMessage(
-            message,
-            scope,
-            scopeId,
-          ),
-      );
-
-    storeMessages(
-      normalized,
-      scope,
-      scopeId,
-      true,
+  if (
+    messageLoads.has(
+      key,
+    )
+  ) {
+    return messageLoads.get(
+      key,
     );
-
-    return ok(
-      normalized,
-    );
-  } catch (error) {
-    return fail(error);
   }
+
+  const generationAtStart =
+    scopeGenerations.get(
+      key,
+    ) || 0;
+
+  const promise = (async () => {
+    try {
+      const messages =
+        await api(
+          `/api/v1/messages/channel/${scopeId}`,
+        );
+
+      const normalized =
+        (
+          messages || []
+        ).map(
+          (message) =>
+            normalizeMessage(
+              message,
+              scope,
+              scopeId,
+            ),
+        );
+
+      /*
+       * If the store gained newer data while this fetch was in
+       * flight (a sent or live-pushed message), merge instead of
+       * replace so the fresh message is never wiped by a stale
+       * response arriving late.
+       */
+      const generationNow =
+        scopeGenerations.get(
+          key,
+        ) || 0;
+
+      storeMessages(
+        normalized,
+        scope,
+        scopeId,
+        generationNow ===
+          generationAtStart,
+      );
+
+      return ok(
+        normalized,
+      );
+    } catch (error) {
+      return fail(error);
+    } finally {
+      if (
+        messageLoads.get(
+          key,
+        ) === promise
+      ) {
+        messageLoads.delete(
+          key,
+        );
+      }
+    }
+  })();
+
+  messageLoads.set(
+    key,
+    promise,
+  );
+
+  return promise;
 }
 
 export function listMessages(
@@ -2732,6 +2892,135 @@ export async function sendOrQueueMessage(
   return sendMessage(
     payload,
   );
+}
+
+// -----------------------------------------------------------------------------
+// Realtime (STOMP) bridge
+// -----------------------------------------------------------------------------
+
+export function getAccessTokenValue() {
+  return getAccessToken();
+}
+
+export async function refreshSessionToken() {
+  return refreshAccessToken();
+}
+
+export function setRealtimeConnected(
+  connected,
+) {
+  updateState((s) => ({
+    ...s,
+    realtimeConnected:
+      !!connected,
+  }));
+}
+
+function removeStoredMessage(
+  scope,
+  scopeId,
+  messageId,
+) {
+  updateState((s) => {
+    const target =
+      s.messages[messageId];
+
+    if (
+      !target ||
+      target.scope !==
+        scope ||
+      target.scopeId !==
+        scopeId
+    ) {
+      return s;
+    }
+
+    const messages = {
+      ...s.messages,
+    };
+
+    delete messages[messageId];
+
+    return {
+      ...s,
+      messages,
+    };
+  });
+
+  bumpScopeGeneration(
+    scope,
+    scopeId,
+  );
+}
+
+/*
+ * Live events pushed over the websocket topic for a channel
+ * the frontend knows about. Scope is resolved from cached state:
+ * DirectChat channels live in state.dms, server channels in
+ * state.channels. Unknown conversations are ignored; they get
+ * fetched normally when the user opens them.
+ *
+ * eventType CREATE/EDIT -> normalize + store (EDIT overwrites by id).
+ * eventType DELETE     -> drop the message from the store.
+ */
+export function applyLiveMessage(
+  payload,
+) {
+  if (
+    !payload ||
+    payload.channelId == null
+  ) {
+    return null;
+  }
+
+  const channelId =
+    payload.channelId;
+
+  const scope = state.dms[
+    channelId
+  ]
+    ? 'dm'
+    : state.channels[
+        channelId
+      ]
+      ? 'channel'
+      : null;
+
+  if (!scope) {
+    return null;
+  }
+
+  if (
+    payload.eventType ===
+    'DELETE'
+  ) {
+    removeStoredMessage(
+      scope,
+      channelId,
+      payload.id,
+    );
+
+    return {
+      id: payload.id,
+      deleted: true,
+    };
+  }
+
+  const normalized =
+    normalizeMessage(
+      payload,
+      scope,
+      channelId,
+    );
+
+  storeMessages(
+    [normalized],
+    scope,
+    channelId,
+    false,
+  );
+
+  return normalized;
 }
 
 export async function editMessage(

@@ -39,16 +39,10 @@ public class UserController {
         @Valid @RequestBody UserRegistrationRequest request) {
         log.info("Request received to register new user: {}", request.getUsername());
 
-        try {
-            userService.registerUser(request);
+        userService.registerUser(request);
 
-            return ResponseEntity.status(HttpStatus.CREATED)
-                .body("User registered successfully");
-        } catch (Exception e) {
-            log.error("Failed to register user: {}", request.getUsername(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body("Registration failed: " + e.getMessage());
-        }
+        return ResponseEntity.status(HttpStatus.CREATED)
+            .body("User registered successfully");
     }
 
     /**

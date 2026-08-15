@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "../context/StoreContext";
+import * as realtime from "../db/realtime";
 import NavRail from "../components/layout/NavRail";
 import ListPanel from "../components/layout/ListPanel";
 import ChatArea from "../components/layout/ChatArea";
@@ -33,6 +34,28 @@ export default function AppShell() {
   useEffect(() => {
     if (!currentUser) navigate("/login", { replace: true });
   }, [currentUser, navigate]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+
+    realtime.connectRealtime();
+
+    return () =>
+      realtime.disconnectRealtime();
+  }, [currentUser?.id]);
+
+  const activeChannelId =
+    section === "dm"
+      ? selectedDmId
+      : section === "channel"
+        ? selectedChannelId
+        : null;
+
+  useEffect(() => {
+    realtime.setActiveChannel(
+      activeChannelId,
+    );
+  }, [activeChannelId]);
 
   useEffect(() => {
     if (section === "dm" && selectedDmId) {
@@ -293,6 +316,21 @@ export default function AppShell() {
         </div>
       )}
 
+      {!store.isOffline() && !db.realtimeConnected && (
+        <div
+          style={{
+            background: "rgba(245, 183, 74, 0.14)",
+            color: "#f5b74a",
+            fontSize: 12.5,
+            textAlign: "center",
+            padding: "6px 12px",
+            flexShrink: 0,
+          }}
+        >
+          Connecting to live updates…
+        </div>
+      )}
+
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <NavRail
           section={section}
@@ -424,9 +462,18 @@ export default function AppShell() {
         <StartDmModal
           users={otherUsers}
           onClose={() => setModal(null)}
-          onPick={(userId) => {
-            const dm = store.getOrCreateDm(currentUser.id, userId);
-            setSelectedDmId(dm.id);
+          onPick={async (userId) => {
+            const result =
+              await store.getOrCreateDm(
+                currentUser.id,
+                userId,
+              );
+
+            if (result.ok) {
+              setSelectedDmId(
+                result.data.id,
+              );
+            }
           }}
         />
       )}

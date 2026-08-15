@@ -117,7 +117,7 @@ public class MessageService {
     }
 
     @Transactional
-    public void deleteMessage(Long messageId, String username) {
+    public Message deleteMessage(Long messageId, String username) {
         Message message = messageRepository.findById(messageId).orElseThrow(() -> new RuntimeException("Message not found!"));
         boolean hasPermission = false;
 
@@ -143,6 +143,7 @@ public class MessageService {
             try { mediaClient.deleteFile(message.getAttachmentFileName()); } catch (Exception e) { System.err.println("Failed to delete media: " + e.getMessage()); }
         }
         messageRepository.delete(message);
+        return message;
     }
 
     public Message scheduleMessage(SendMessageRequest request, Long scheduledAt, String username) {
